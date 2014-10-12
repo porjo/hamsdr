@@ -21,6 +21,8 @@ const (
 	AUTO_GAIN           = -100
 	BUFFER_DUMP         = 4096
 
+	CIC_TABLE_MAX = 10
+
 	FREQUENCIES_LIMIT = 1000
 )
 
@@ -33,7 +35,6 @@ type dongleState struct {
 	freq           uint32
 	rate           uint32
 	gain           int
-	buf16          [MAXIMUM_BUF_LENGTH]uint16
 	ppmError       int
 	offsetTuning   int
 	directSampling int
@@ -42,16 +43,18 @@ type dongleState struct {
 }
 
 type demodState struct {
-	exitFlag   int
-	lowpassed  [MAXIMUM_BUF_LENGTH]int16
-	lpIHist    [10][6]int16
-	lpQHist    [10][6]int16
-	result     [MAXIMUM_BUF_LENGTH]int16
-	resultLen  int
-	droopIHist [9]int16
-	droopQHist [9]int16
-	rateIn     int
-	rateOut    int
+	exitFlag       int
+	lowpassed      []int16
+	lpIHist        [10][6]int16
+	lpQHist        [10][6]int16
+	result         [MAXIMUM_BUF_LENGTH]int16 // ?
+	resultLen      int                       // ?
+	demodDataChan  chan []int16
+	deviceDataChan chan []uint16
+	droopIHist     [9]int16
+	droopQHist     [9]int16
+	rateIn         int
+	rateOut        int
 	//rateOut2           int
 	nowR               int
 	nowJ               int
@@ -77,11 +80,11 @@ type demodState struct {
 }
 
 type outputState struct {
-	exitFlag int
-	file     *os.File
-	filename string
-	result   [MAXIMUM_BUF_LENGTH]int16
-	rate     int
+	exitFlag      int
+	file          *os.File
+	filename      string
+	demodDataChan chan []int16
+	rate          int
 }
 
 type controllerState struct {
@@ -259,6 +262,114 @@ func amDemod(am *demodState) {
 	// lowpass? (3khz)  highpass?  (dc)
 }
 
+//static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
+func rtlsdrCallback(buf []byte, ctx *rtl.UserCtx) {
+
+	var i int
+	var s *dongleState
+	var d *demodState
+
+	if s, ok := (*ctx).(*dongleState); ok {
+		d = s.demodTarget
+	} else {
+		return
+	}
+
+	if s.mute > 0 && s.mute < len(buf) {
+		for i = 0; i < s.mute; i++ {
+			buf[i] = 127
+		}
+		s.mute = 0
+	}
+	if s.offsetTuning == 0 {
+		//rotate_90(buf, len)
+	}
+	var buf16 []uint16
+	for i = 0; i < len(buf); i++ {
+		buf16 = append(buf16, uint16(buf[i]-127))
+	}
+	d.deviceDataChan <- buf16
+	//d.lowpassed = append(d.lowpassed, s.buf16)
+	//memcpy(d->lowpassed, s->buf16, 2*len);
+}
+
+func dongleRoutine(s *dongleState) {
+	var ctx rtl.UserCtx = s
+	err := dongle.dev.ReadAsync(rtlsdrCallback, &ctx, rtl.DefaultAsyncBufNumber, rtl.DefaultBufLength)
+	if err != nil {
+		log.Printf("\tReadAsync Fail - error: %s\n", err)
+	}
+}
+
+func demodRoutine(d *demodState) {
+	//o := d.outputTarget
+	for {
+		d.fullDemod()
+
+		// check exit?
+
+		if d.squelchLevel > 0 && d.squelchHits > d.conseqSquelch {
+			// hair trigger
+			d.squelchHits = d.conseqSquelch + 1
+			continue
+		}
+		//memcpy(o->result, d->result, 2*d->result_len);
+		//o.demodDataChan <- d.demodDataChan
+	}
+}
+
+func (d *demodState) fullDemod() {
+	var i, dsP int
+	//var sr int
+	lpLen := len(d.lowpassed)
+	dsP = d.downsamplePasses
+	if dsP > 0 {
+		for i = 0; i < dsP; i++ {
+			fifthOrder(d.lowpassed, 0, d.lpIHist[i])
+			fifthOrder(d.lowpassed, 1, d.lpQHist[i])
+		}
+		lpLen = lpLen >> uint(dsP)
+		/* droop compensation */
+		if d.compFirSize == 9 && dsP <= CIC_TABLE_MAX {
+			//generic_fir(d->lowpassed, d->lp_len, cic_9_tables[ds_p], d->droop_i_hist);
+			//generic_fir(d->lowpassed+1, d->lp_len-1, cic_9_tables[ds_p], d->droop_q_hist);
+		}
+	} else {
+		//low_pass(d);
+	}
+
+	/*
+		// power squelch
+		if d.squelch_level > 0 {
+			sr = rms(d.lowpassed, 1);
+			if (sr < d->squelch_level) {
+				d->squelch_hits++;
+				for (i=0; i<d->lp_len; i++) {
+					d->lowpassed[i] = 0;
+				}
+			} else {
+				d->squelch_hits = 0;}
+		}
+		// lowpassed -> result
+		d->mode_demod(d);
+		if (d->mode_demod == &raw_demod) {
+			return;
+		}
+		// TODO: fm noise squelch
+		// use nicer filter here too?
+		if (d->post_downsample > 1) {
+			d->result_len = low_pass_simple(d->result, d->result_len, d->post_downsample);}
+		if (d->deemph) {
+			deemph_filter(d);}
+		if (d->dc_block) {
+			dc_block_filter(d);}
+		if (d->rate_out2 > 0) {
+			low_pass_real(d);
+			//arbitrary_resample(d->result, d->result, d->result_len, d->result_len * d->rate_out2 / d->rate_out);
+		}
+	*/
+}
+
 func main() {
 
 	var err error
@@ -312,7 +423,8 @@ func main() {
 
 	ACTUAL_BUF_LENGTH = lcmPost[demod.postDownsample] * DEFAULT_BUF_LENGTH
 
-	if dongle.dev, err = rtl.Open(0); err != nil {
+	dongle.dev, err = rtl.Open(dongle.devIndex)
+	if err != nil {
 		log.Fatalf("Failed to open dongle, '%s', exiting\n", err)
 	}
 	defer dongle.dev.Close()
@@ -321,22 +433,24 @@ func main() {
 	if dongle.gain == AUTO_GAIN {
 		err = dongle.dev.SetTunerGainMode(false)
 		if err != nil {
-			log.Fatalln(err)
+			log.Fatalf("Error setting tuner auto-gain: %s", err)
 		}
 	} else {
 		dongle.gain, err = nearestGain(dongle.dev, dongle.gain)
 		if err != nil {
-			log.Fatalln(err)
+			log.Fatalf("Error getting nearest gain to %d: %s", dongle.gain, err)
 		}
 		err = dongle.dev.SetTunerGain(dongle.gain)
 		if err != nil {
-			log.Fatalln(err)
+			log.Fatalf("Error setting tuner manual gain to %d: %s", dongle.gain)
 		}
 	}
 
-	err = dongle.dev.SetFreqCorrection(dongle.ppmError)
-	if err != nil {
-		log.Fatalln(err)
+	if dongle.ppmError > 0 {
+		err = dongle.dev.SetFreqCorrection(dongle.ppmError)
+		if err != nil {
+			log.Fatalf("Error setting frequency correction to %d: %s", dongle.ppmError, err)
+		}
 	}
 
 	if output.filename == "-" {

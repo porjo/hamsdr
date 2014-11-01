@@ -1,3 +1,23 @@
+// Copyright (C) 2014 Ian Bishop
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation; either version 2 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License along
+// with this program; if not, write to the Free Software Foundation, Inc.,
+// 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+
+// Package hamsdr implements a software-defined radio scanner
+//
+// hamsdr requires rtlsdr library
+//
 package main
 
 import (
@@ -42,6 +62,7 @@ type dongleState struct {
 	directSampling int
 	mute           int
 	demodTarget    *demodState
+	lpChan         chan []int16
 }
 
 type demodState struct {
@@ -50,7 +71,6 @@ type demodState struct {
 	lpQHist   [10][6]int16
 	result    []int16 // ?
 	//resultLen  int                  // ?
-	lpChan     chan []int16
 	droopIHist [9]int16
 	droopQHist [9]int16
 	rateIn     int
@@ -76,15 +96,12 @@ type demodState struct {
 	prevLprIndex       int
 	dcBlock, dcAvg     int
 	modeDemod          func(fm *demodState)
-	outputTarget       *outputState
 }
 
 type outputState struct {
-	file      *os.File
-	filename  string
-	result    [maximumBufLen]int16 // ?
-	resultLen int                  // ?
-	rate      int
+	file     *os.File
+	filename string
+	rate     int
 
 	resultChan chan []int16
 }
@@ -93,6 +110,8 @@ type controllerState struct {
 	freqs   frequencies
 	freqNow int
 	edge    int
+
+	hopChan chan bool
 }
 
 var dongle *dongleState
@@ -104,38 +123,26 @@ var actualBufLen int
 var lcmPost = [17]int{1, 1, 1, 3, 1, 5, 3, 7, 1, 9, 5, 11, 3, 13, 7, 15, 1}
 
 func init() {
-
 	dongle = &dongleState{}
-	demod = &demodState{}
 	output = &outputState{}
+	demod = &demodState{}
 	controller = &controllerState{}
 
-	dongle.Init()
-	demod.Init()
-	output.Init()
-}
+	dongle.rate = defaultSampleRate
+	dongle.gain = autoGain // tenths of a dB
+	dongle.demodTarget = demod
+	dongle.lpChan = make(chan []int16, 1)
 
-func (s *dongleState) Init() {
-	s.rate = defaultSampleRate
-	s.gain = autoGain // tenths of a dB
-	s.demodTarget = demod
-}
+	demod.rateIn = defaultSampleRate
+	demod.rateOut = defaultSampleRate
+	demod.conseqSquelch = 10
+	demod.squelchHits = 11
+	demod.postDownsample = 1 // once this works, default = 4
 
-func (s *demodState) Init() {
-	s.rateIn = defaultSampleRate
-	s.rateOut = defaultSampleRate
-	s.conseqSquelch = 10
-	s.squelchHits = 11
-	s.postDownsample = 1 // once this works, default = 4
-	//s.modeDemod = fmDemod
-	s.outputTarget = output
+	output.rate = defaultSampleRate
+	output.resultChan = make(chan []int16, 1)
 
-	s.lpChan = make(chan []int16, 1)
-}
-
-func (s *outputState) Init() {
-	s.rate = defaultSampleRate
-	s.resultChan = make(chan []int16, 1)
+	controller.hopChan = make(chan bool)
 }
 
 func (f frequencies) String() string {
@@ -195,96 +202,82 @@ func (f *frequencies) Set(val string) (err error) {
 
 func rtlsdrCallback(buf []byte, ctx *rtl.UserCtx) {
 	var i int
-	var quit exitChan
-	var ok bool
 
-	if quit, ok = (*ctx).(exitChan); !ok {
-		fmt.Fprintf(os.Stderr, "rtlsdr callback, channel not recognised\n")
-		return
-	}
-
-	select {
-
-	case <-quit:
-		return
-	default:
-
-		if dongle.mute > 0 && dongle.mute < len(buf) {
-			for i = 0; i < dongle.mute; i++ {
-				buf[i] = 127
-			}
-			dongle.mute = 0
+	if dongle.mute > 0 && dongle.mute < len(buf) {
+		for i = 0; i < dongle.mute; i++ {
+			buf[i] = 127
 		}
-		/*
-			if dongleS.offsetTuning {
-				//rotate_90(buf, len)
-			}
-		*/
-		buf16 := make([]int16, len(buf))
-		for i := range buf {
-			buf16[i] = int16(buf[i]) - 127
-		}
-		fmt.Fprintf(os.Stderr, "buf %x %x %x %x, buf16 %x %x %x %x, buf len %d\n", buf[0], buf[1], buf[2], buf[3], uint16(buf16[0]), uint16(buf16[1]), uint16(buf16[2]), uint16(buf16[3]), len(buf))
-
-		demod.lpChan <- buf16
+		dongle.mute = 0
 	}
+	/*
+		if dongleS.offsetTuning {
+			//rotate_90(buf, len)
+		}
+	*/
+	buf16 := make([]int16, len(buf))
+	for i := range buf {
+		buf16[i] = int16(buf[i]) - 127
+	}
+	//fmt.Fprintf(os.Stderr, "buf %x %x %x %x, buf16 %x %x %x %x, buf len %d\n", buf[0], buf[1], buf[2], buf[3], uint16(buf16[0]), uint16(buf16[1]), uint16(buf16[2]), uint16(buf16[3]), len(buf))
+
+	dongle.lpChan <- buf16
 }
 
 // run as goroutine
 // ReadAsync blocks until CancelAsync
-func dongleRoutine(wg *sync.WaitGroup, quit exitChan) {
-	var userctx rtl.UserCtx = quit
+func dongleRoutine(wg *sync.WaitGroup) {
 
 	defer wg.Done()
-	err := dongle.dev.ReadAsync(rtlsdrCallback, &userctx, rtl.DefaultAsyncBufNumber, rtl.DefaultBufLength)
+	err := dongle.dev.ReadAsync(rtlsdrCallback, nil, rtl.DefaultAsyncBufNumber, rtl.DefaultBufLength)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ReadAsync failed, err %s\n", err)
 	}
+
+	close(dongle.lpChan)
 
 	fmt.Fprintf(os.Stderr, "Returning from dongleRoutine\n")
 }
 
 // run as goroutine
-func demodRoutine(wg *sync.WaitGroup, quit exitChan) {
-	d := demod
-	o := d.outputTarget
-	defer wg.Done()
+func demodRoutine(wg *sync.WaitGroup) {
 
-	var lp []int16
+	var ok bool
+
+	defer wg.Done()
 
 	for {
 		select {
 
-		case <-quit:
-			fmt.Fprintf(os.Stderr, "Returning from demodRoutine\n")
-			close(output.resultChan)
-			return
+		case demod.lowpassed, ok = <-dongle.lpChan:
 
-		case lp = <-demod.lpChan:
+			if !ok {
+				close(output.resultChan)
+				close(controller.hopChan)
+				fmt.Fprintf(os.Stderr, "Returning from demodRoutine\n")
+				return
+			}
+
 			//fmt.Fprintf(os.Stderr, "demod, lp %x %x, len %d\n", lp[0], lp[1], len(lp))
-			d.lowpassed = lp
+			demod.fullDemod()
 
-			//lock?
-			d.fullDemod()
-			//unlock?
-
-			if d.squelchLevel > 0 && d.squelchHits > d.conseqSquelch {
+			if demod.squelchLevel > 0 && demod.squelchHits > demod.conseqSquelch {
 				// hair trigger
-				d.squelchHits = d.conseqSquelch + 1
+				demod.squelchHits = demod.conseqSquelch + 1
+				controller.hopChan <- true
 				continue
 			}
 			//fmt.Fprintf(os.Stderr, "demod, result %x %x, len %d\n", d.result[0], d.result[1], len(d.result))
 			//memcpy(o->result, d->result, 2*d->result_len);
 			var result []int16
-			result = append(result, d.result...)
-			o.resultChan <- result
+			result = append(result, demod.result...)
+			output.resultChan <- result
 		}
 	}
 }
 
 // thoughts for multiple dongles
 // might be no good using a controller thread if retune/rate blocks
-func controllerRoutine(wg *sync.WaitGroup, quit exitChan) {
+func controllerRoutine(wg *sync.WaitGroup) {
 	var err error
 
 	defer wg.Done()
@@ -315,15 +308,12 @@ func controllerRoutine(wg *sync.WaitGroup, quit exitChan) {
 	for {
 		select {
 
-		case <-quit:
-			fmt.Fprintf(os.Stderr, "Returning from controllerRoutine\n")
-			if err := dongle.dev.CancelAsync(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error canceling async %s\n", err)
-			}
-			close(demod.lpChan)
-			return
+		case _, ok := <-controller.hopChan:
 
-		default:
+			if !ok {
+				fmt.Fprintf(os.Stderr, "Returning from controllerRoutine\n")
+				return
+			}
 
 			if len(s.freqs) <= 1 {
 				continue
@@ -341,19 +331,22 @@ func controllerRoutine(wg *sync.WaitGroup, quit exitChan) {
 	}
 }
 
-func outputRoutine(wg *sync.WaitGroup, quit exitChan) {
+func outputRoutine(wg *sync.WaitGroup) {
 	var err error
 
 	defer wg.Done()
 	for {
 		select {
 
-		case <-quit:
-			fmt.Fprintf(os.Stderr, "Returning from outputRoutine\n")
-			return
+		case result, ok := <-output.resultChan:
 
-		case result := <-output.resultChan:
-			fmt.Fprintf(os.Stderr, "output, result len %d\n", len(result))
+			if !ok {
+				fmt.Fprintf(os.Stderr, "Returning from outputRoutine\n")
+				return
+			}
+
+			//fmt.Fprintf(os.Stderr, "output, result len %d\n", len(result))
+			// TODO: use timed wait and pad out under runs
 			err = binary.Write(output.file, binary.LittleEndian, result)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "output write error %s\n", err)
@@ -398,8 +391,6 @@ func main() {
 	switch *demodMode {
 	case "fm":
 		demod.modeDemod = fmDemod
-	case "am":
-		demod.modeDemod = amDemod
 	default:
 		demod.modeDemod = amDemod
 	}
@@ -490,9 +481,10 @@ func main() {
 		output.file, err = os.OpenFile(output.filename, os.O_RDWR|os.O_APPEND, 0660)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
+			return
 		}
+		defer output.file.Close()
 	}
-	defer output.file.Close()
 
 	// Reset endpoint before we start reading from it (mandatory)
 	err = dongle.dev.ResetBuffer()
@@ -514,11 +506,20 @@ func main() {
 
 	wg.Add(4)
 
-	go controllerRoutine(&wg, quit)
-	go outputRoutine(&wg, quit)
-	go demodRoutine(&wg, quit)
-	go dongleRoutine(&wg, quit)
+	go controllerRoutine(&wg)
+	go outputRoutine(&wg)
+	go demodRoutine(&wg)
+	go dongleRoutine(&wg)
 
+	controller.hopChan <- true
+
+	<-quit
+	fmt.Fprintf(os.Stderr, "rtlsdr CancelAsync()\n")
+	if err := dongle.dev.CancelAsync(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error canceling async %s\n", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "Wainting for goroutines to finish...\n")
 	wg.Wait()
 
 	fmt.Fprintf(os.Stderr, "Exiting...\n")

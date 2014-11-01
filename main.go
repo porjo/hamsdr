@@ -1,60 +1,59 @@
 package main
 
 import (
+	"encoding/binary"
 	"flag"
 	"fmt"
-	"log"
-	"math"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
-	// "unsafe"
+	"sync"
+	//	"time"
 
 	rtl "github.com/jpoirier/gortlsdr"
 )
 
 const (
-	DEFAULT_SAMPLE_RATE = 24000
-	DEFAULT_BUF_LENGTH  = (1 * 16384)
-	MAXIMUM_OVERSAMPLE  = 16
-	MAXIMUM_BUF_LENGTH  = (MAXIMUM_OVERSAMPLE * DEFAULT_BUF_LENGTH)
-	AUTO_GAIN           = -100
-	BUFFER_DUMP         = 4096
+	defaultSampleRate = 24000
+	defaultBufLen     = (1 * 16384)
+	maximumOversample = 16
+	maximumBufLen     = (maximumOversample * defaultBufLen)
+	autoGain          = -100
+	bufferDump        = 4096
 
-	CIC_TABLE_MAX = 10
+	//cicTableMax = 10
 
-	FREQUENCIES_LIMIT = 1000
+	frequenciesLimit = 1000
 )
 
 type frequencies []uint32
+type exitChan chan struct{}
 
 type dongleState struct {
-	exitFlag       int
 	dev            *rtl.Context
 	devIndex       int
 	freq           uint32
 	rate           uint32
 	gain           int
 	ppmError       int
-	offsetTuning   int
+	offsetTuning   bool
 	directSampling int
 	mute           int
 	demodTarget    *demodState
 }
 
 type demodState struct {
-	exitFlag       int
-	lowpassed      []int16
-	lpIHist        [10][6]int16
-	lpQHist        [10][6]int16
-	result         [MAXIMUM_BUF_LENGTH]int16 // ?
-	resultLen      int                       // ?
-	demodDataChan  chan []int16
-	deviceDataChan chan []uint16
-	droopIHist     [9]int16
-	droopQHist     [9]int16
-	rateIn         int
-	rateOut        int
+	lowpassed  []int16
+	lpIHist    [10][6]int16
+	lpQHist    [10][6]int16
+	result     [maximumBufLen]int16 // ?
+	resultLen  int                  // ?
+	lpChan     chan []int16
+	droopIHist [9]int16
+	droopQHist [9]int16
+	rateIn     int
+	rateOut    int
 	//rateOut2           int
 	nowR               int
 	nowJ               int
@@ -80,19 +79,19 @@ type demodState struct {
 }
 
 type outputState struct {
-	exitFlag      int
-	file          *os.File
-	filename      string
-	demodDataChan chan []int16
-	rate          int
+	file      *os.File
+	filename  string
+	result    [maximumBufLen]int16 // ?
+	resultLen int                  // ?
+	rate      int
+
+	resultChan chan []int16
 }
 
 type controllerState struct {
-	exitFlag int
-	freqs    frequencies
-	freqNow  int
-	edge     int
-	wbMode   int
+	freqs   frequencies
+	freqNow int
+	edge    int
 }
 
 var dongle *dongleState
@@ -100,7 +99,7 @@ var demod *demodState
 var output *outputState
 var controller *controllerState
 
-var ACTUAL_BUF_LENGTH int
+var actualBufLen int
 var lcmPost = [17]int{1, 1, 1, 3, 1, 5, 3, 7, 1, 9, 5, 11, 3, 13, 7, 15, 1}
 
 func init() {
@@ -117,19 +116,21 @@ func init() {
 }
 
 func (s *dongleState) Init() {
-	s.rate = DEFAULT_SAMPLE_RATE
-	s.gain = AUTO_GAIN // tenths of a dB
+	s.rate = defaultSampleRate
+	s.gain = autoGain // tenths of a dB
 	s.demodTarget = demod
 }
 
 func (s *demodState) Init() {
-	s.rateIn = DEFAULT_SAMPLE_RATE
-	s.rateOut = DEFAULT_SAMPLE_RATE
+	s.rateIn = defaultSampleRate
+	s.rateOut = defaultSampleRate
 	s.conseqSquelch = 10
 	s.squelchHits = 11
 	s.postDownsample = 1 // once this works, default = 4
-	s.modeDemod = fmDemod
+	//s.modeDemod = fmDemod
 	s.outputTarget = output
+
+	s.lpChan = make(chan []int16)
 }
 
 func (s *controllerState) Init() {
@@ -137,31 +138,8 @@ func (s *controllerState) Init() {
 }
 
 func (s *outputState) Init() {
-	s.rate = DEFAULT_SAMPLE_RATE
-}
-
-func fmDemod(fm *demodState) {
-	var i, pcm int
-	lp := fm.lowpassed
-	lpLen := len(fm.lowpassed)
-	pcm = polarDiscriminant(lp[0], lp[1], int16(fm.preR), int16(fm.preJ))
-	fm.result[0] = int16(pcm)
-	for i = 2; i < (lpLen - 1); i += 2 {
-		pcm = polarDiscriminant(lp[i], lp[i+1], lp[i-2], lp[i-1])
-		fm.result[i/2] = int16(pcm)
-	}
-	fm.preR = int(lp[lpLen-2])
-	fm.preJ = int(lp[lpLen-1])
-	fm.resultLen = lpLen / 2
-}
-
-func polarDiscriminant(ar, aj, br, bj int16) int {
-	var cr, cj int16
-	var angle float64
-	cr = ar*br - aj*bj
-	cj = aj*br + ar*bj
-	angle = math.Atan2(float64(cj), float64(cr))
-	return int(angle / 3.14159 * (1 << 14))
+	s.rate = defaultSampleRate
+	s.resultChan = make(chan []int16)
 }
 
 func (f frequencies) String() string {
@@ -169,7 +147,6 @@ func (f frequencies) String() string {
 }
 
 func (f *frequencies) Set(val string) (err error) {
-
 	var i int
 	var start, stop, step int
 
@@ -177,7 +154,7 @@ func (f *frequencies) Set(val string) (err error) {
 
 	bits := strings.Split(val, ":")
 
-	fmt.Printf("bits len %d", len(bits))
+	fmt.Fprintf(os.Stderr, "bits len %d\n", len(bits))
 
 	switch len(bits) {
 	case 1:
@@ -211,7 +188,7 @@ func (f *frequencies) Set(val string) (err error) {
 
 	for j := start; j <= stop; j += step {
 		freqs := *f
-		if len(freqs) > FREQUENCIES_LIMIT {
+		if len(freqs) > frequenciesLimit {
 			break
 		}
 		freqs = append(freqs, uint32(j))
@@ -220,164 +197,201 @@ func (f *frequencies) Set(val string) (err error) {
 	return
 }
 
-//func (dev *rtl.Context) nearestGain(targetGain int) (err error, nearest int) {
-func nearestGain(dev *rtl.Context, targetGain int) (nearest int, err error) {
-	err = dev.SetTunerGainMode(true)
-	if err != nil {
-		return
-	}
-	gains, err := dev.GetTunerGains()
-	if err != nil {
-		return
-	}
-
-	if len(gains) == 0 {
-		err = fmt.Errorf("No gains returned")
-		return
-	}
-	nearest = gains[0]
-	for i := 0; i < len(gains); i++ {
-		res1 := math.Abs(float64(targetGain - nearest))
-		res2 := math.Abs(float64(targetGain - gains[i]))
-		if res2 < res1 {
-			nearest = gains[i]
-		}
-	}
-	return
-}
-
-// TODO: fix this extreme laziness
-func amDemod(am *demodState) {
-	var pcm int16
-	lp := am.lowpassed
-	r := am.result
-	for i := 0; i < len(am.lowpassed); i += 2 {
-		// hypot uses floats but won't overflow
-		//r[i/2] = (int16_t)hypot(lp[i], lp[i+1]);
-		pcm = lp[i] * lp[i]
-		pcm += lp[i+1] * lp[i+1]
-		r[i/2] = int16(math.Sqrt(float64(pcm))) * int16(am.outputScale)
-	}
-	am.resultLen = len(am.lowpassed) / 2
-	// lowpass? (3khz)  highpass?  (dc)
-}
-
-//static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
 func rtlsdrCallback(buf []byte, ctx *rtl.UserCtx) {
-
 	var i int
-	var s *dongleState
-	var d *demodState
+	var quit exitChan
+	var ok bool
 
-	if s, ok := (*ctx).(*dongleState); ok {
-		d = s.demodTarget
-	} else {
+	if quit, ok = (*ctx).(exitChan); !ok {
+		fmt.Fprintf(os.Stderr, "rtlsdr callback, channel not recognised\n")
 		return
 	}
 
-	if s.mute > 0 && s.mute < len(buf) {
-		for i = 0; i < s.mute; i++ {
-			buf[i] = 127
+	select {
+
+	case <-quit:
+		fmt.Fprintf(os.Stderr, "rtlsdr callback, channel closed\n")
+		return
+	default:
+
+		if dongle.mute > 0 && dongle.mute < len(buf) {
+			for i = 0; i < dongle.mute; i++ {
+				buf[i] = 127
+			}
+			dongle.mute = 0
 		}
-		s.mute = 0
+		/*
+			if dongleS.offsetTuning {
+				//rotate_90(buf, len)
+			}
+		*/
+		// size of int16
+		var s = 2
+		buf16 := make([]int16, len(buf)/s)
+		for i := range buf16 {
+			samp := int16(binary.LittleEndian.Uint16(buf[i*s : (i+1)*s]))
+			buf16[i] = samp - 127
+		}
+		demod.lpChan <- buf16
 	}
-	if s.offsetTuning == 0 {
-		//rotate_90(buf, len)
-	}
-	var buf16 []uint16
-	for i = 0; i < len(buf); i++ {
-		buf16 = append(buf16, uint16(buf[i]-127))
-	}
-	d.deviceDataChan <- buf16
-	//d.lowpassed = append(d.lowpassed, s.buf16)
-	//memcpy(d->lowpassed, s->buf16, 2*len);
 }
 
-func dongleRoutine(s *dongleState) {
-	var ctx rtl.UserCtx = s
-	err := dongle.dev.ReadAsync(rtlsdrCallback, &ctx, rtl.DefaultAsyncBufNumber, rtl.DefaultBufLength)
+// run as goroutine
+// ReadAsync blocks until CancelAsync
+func dongleRoutine(wg *sync.WaitGroup, quit exitChan) {
+	var userctx rtl.UserCtx = quit
+
+	defer wg.Done()
+	err := dongle.dev.ReadAsync(rtlsdrCallback, &userctx, rtl.DefaultAsyncBufNumber, rtl.DefaultBufLength)
 	if err != nil {
-		log.Printf("\tReadAsync Fail - error: %s\n", err)
+		fmt.Fprintf(os.Stderr, "ReadAsync failed, err %s\n", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "Returning from dongleRoutine\n")
+}
+
+// run as goroutine
+func demodRoutine(wg *sync.WaitGroup, quit exitChan) {
+	d := demod
+	o := d.outputTarget
+	defer wg.Done()
+
+	var lp []int16
+
+	for {
+		select {
+
+		case <-quit:
+			fmt.Fprintf(os.Stderr, "Returning from demodRoutine\n")
+			return
+
+		case lp = <-demod.lpChan:
+
+			d.lowpassed = lp
+
+			//lock?
+			d.fullDemod()
+			//unlock?
+
+			if d.squelchLevel > 0 && d.squelchHits > d.conseqSquelch {
+				// hair trigger
+				d.squelchHits = d.conseqSquelch + 1
+				continue
+			}
+			//memcpy(o->result, d->result, 2*d->result_len);
+			var result []int16
+			copy(result, d.result[:])
+			o.resultChan <- result
+		}
 	}
 }
 
-func demodRoutine(d *demodState) {
-	//o := d.outputTarget
+// thoughts for multiple dongles
+// might be no good using a controller thread if retune/rate blocks
+func controllerRoutine(wg *sync.WaitGroup, quit exitChan) {
+	var err error
+
+	defer wg.Done()
+
+	s := controller
+
+	// set up primary channel
+	optimalSettings(int(s.freqs[0]), demod.rateIn)
+
+	// Set the frequency
+	err = dongle.dev.SetCenterFreq(int(dongle.freq))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error setting frequency %d\n", dongle.freq)
+		return
+	}
+	//fmt.Fprintf(os.Stderr, "Oversampling input by: %ix.\n", demod.downsample)
+	//fmt.Fprintf(os.Stderr, "Oversampling output by: %ix.\n", demod.postDownsample)
+	fmt.Fprintf(os.Stderr, "Buffer size: %0.2fms\n", 1000*0.5*float32(actualBufLen)/float32(dongle.rate))
+
+	// Set the sample rate
+	err = dongle.dev.SetSampleRate(int(dongle.rate))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error setting sample rate %d\n", dongle.rate)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "Output at %d Hz.\n", demod.rateIn/demod.postDownsample)
+
 	for {
-		d.fullDemod()
+		select {
 
-		// check exit?
+		case <-quit:
+			fmt.Fprintf(os.Stderr, "Returning from controllerRoutine\n")
+			if err := dongle.dev.CancelAsync(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error canceling async %s\n", err)
+			}
+			return
 
-		if d.squelchLevel > 0 && d.squelchHits > d.conseqSquelch {
-			// hair trigger
-			d.squelchHits = d.conseqSquelch + 1
-			continue
+		default:
+
+			if len(s.freqs) <= 1 {
+				continue
+			}
+			// hacky hopping
+			s.freqNow = (s.freqNow + 1) % len(s.freqs)
+			optimalSettings(int(s.freqs[s.freqNow]), demod.rateIn)
+			err = dongle.dev.SetCenterFreq(int(dongle.freq))
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error setting frequency %d\n", dongle.freq)
+				return
+			}
+			dongle.mute = bufferDump
 		}
-		//memcpy(o->result, d->result, 2*d->result_len);
-		//o.demodDataChan <- d.demodDataChan
+	}
+}
+
+func outputRoutine(wg *sync.WaitGroup, quit exitChan) {
+	var err error
+
+	defer wg.Done()
+	for {
+		select {
+
+		case <-quit:
+			fmt.Fprintf(os.Stderr, "Returning from outputRoutine\n")
+			return
+
+		case result := <-output.resultChan:
+			err = binary.Write(output.file, binary.LittleEndian, result)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "output write error %s\n", err)
+			}
+		}
 	}
 }
 
 func (d *demodState) fullDemod() {
-	var i, dsP int
-	//var sr int
-	lpLen := len(d.lowpassed)
-	dsP = d.downsamplePasses
-	if dsP > 0 {
-		for i = 0; i < dsP; i++ {
-			fifthOrder(d.lowpassed, 0, d.lpIHist[i])
-			fifthOrder(d.lowpassed, 1, d.lpQHist[i])
+	var i int
+
+	lowPass(d)
+
+	// power squelch
+	if d.squelchLevel > 0 {
+		sr := rms(d.lowpassed, 1)
+		if sr < d.squelchLevel {
+			d.squelchHits++
+			for i = 0; i < len(d.lowpassed); i++ {
+				d.lowpassed[i] = 0
+			}
+		} else {
+			d.squelchHits = 0
 		}
-		lpLen = lpLen >> uint(dsP)
-		/* droop compensation */
-		if d.compFirSize == 9 && dsP <= CIC_TABLE_MAX {
-			//generic_fir(d->lowpassed, d->lp_len, cic_9_tables[ds_p], d->droop_i_hist);
-			//generic_fir(d->lowpassed+1, d->lp_len-1, cic_9_tables[ds_p], d->droop_q_hist);
-		}
-	} else {
-		//low_pass(d);
 	}
 
-	/*
-		// power squelch
-		if d.squelch_level > 0 {
-			sr = rms(d.lowpassed, 1);
-			if (sr < d->squelch_level) {
-				d->squelch_hits++;
-				for (i=0; i<d->lp_len; i++) {
-					d->lowpassed[i] = 0;
-				}
-			} else {
-				d->squelch_hits = 0;}
-		}
-		// lowpassed -> result
-		d->mode_demod(d);
-		if (d->mode_demod == &raw_demod) {
-			return;
-		}
-		// TODO: fm noise squelch
-		// use nicer filter here too?
-		if (d->post_downsample > 1) {
-			d->result_len = low_pass_simple(d->result, d->result_len, d->post_downsample);}
-		if (d->deemph) {
-			deemph_filter(d);}
-		if (d->dc_block) {
-			dc_block_filter(d);}
-		if (d->rate_out2 > 0) {
-			low_pass_real(d);
-			//arbitrary_resample(d->result, d->result, d->result_len, d->result_len * d->rate_out2 / d->rate_out);
-		}
-	*/
+	d.modeDemod(d)
 }
 
 func main() {
-
 	var err error
 
 	flag.IntVar(&dongle.devIndex, "d", 0, "dongle device index")
 	flag.Var(&controller.freqs, "f", "frequency or range of frequencies, and step e.g 92900:100100:25000")
 	flag.IntVar(&demod.squelchLevel, "l", 0, "squelch level")
-	flag.IntVar(&demod.rateIn, "s", 0, "sample rate")
+	rateIn := flag.Int("s", 0, "sample rate")
 	flag.IntVar(&dongle.ppmError, "p", 0, "ppm error")
 	demodMode := flag.String("M", "am", "demodulation mode [fm, am]")
 
@@ -388,20 +402,29 @@ func main() {
 		demod.modeDemod = fmDemod
 	case "am":
 		demod.modeDemod = amDemod
+	default:
+		demod.modeDemod = amDemod
+	}
+
+	if *rateIn > 0 {
+		demod.rateIn = *rateIn
 	}
 
 	demod.rateOut = demod.rateIn
 
 	if len(controller.freqs) == 0 {
-		log.Fatalln("Please specify a frequency.")
+		fmt.Fprintf(os.Stderr, "Please specify a frequency.")
+		return
 	}
 
-	if len(controller.freqs) >= FREQUENCIES_LIMIT {
-		log.Fatalf("Too many channels, maximum %d.\n", FREQUENCIES_LIMIT)
+	if len(controller.freqs) >= frequenciesLimit {
+		fmt.Fprintf(os.Stderr, "Too many channels, maximum %d.\n", frequenciesLimit)
+		return
 	}
 
 	if len(controller.freqs) > 1 && demod.squelchLevel == 0 {
-		log.Fatalln("Please specify a squelch level.  Required for scanning multiple frequencies.")
+		fmt.Fprintf(os.Stderr, "Please specify a squelch level.  Required for scanning multiple frequencies.")
+		return
 	}
 
 	/* quadruple sample_rate to limit to Δθ to ±π/2 */
@@ -421,35 +444,40 @@ func main() {
 		output.filename = "-"
 	}
 
-	ACTUAL_BUF_LENGTH = lcmPost[demod.postDownsample] * DEFAULT_BUF_LENGTH
+	actualBufLen = lcmPost[demod.postDownsample] * defaultBufLen
 
 	dongle.dev, err = rtl.Open(dongle.devIndex)
 	if err != nil {
-		log.Fatalf("Failed to open dongle, '%s', exiting\n", err)
+		fmt.Fprintf(os.Stderr, "Failed to open dongle, '%s', exiting\n", err)
+		return
 	}
 	defer dongle.dev.Close()
 
 	/* Set the tuner gain */
-	if dongle.gain == AUTO_GAIN {
+	if dongle.gain == autoGain {
 		err = dongle.dev.SetTunerGainMode(false)
 		if err != nil {
-			log.Fatalf("Error setting tuner auto-gain: %s", err)
+			fmt.Fprintf(os.Stderr, "Error setting tuner auto-gain: %s\n", err)
+			return
 		}
 	} else {
 		dongle.gain, err = nearestGain(dongle.dev, dongle.gain)
 		if err != nil {
-			log.Fatalf("Error getting nearest gain to %d: %s", dongle.gain, err)
+			fmt.Fprintf(os.Stderr, "Error getting nearest gain to %d: %s\n", dongle.gain, err)
+			return
 		}
 		err = dongle.dev.SetTunerGain(dongle.gain)
 		if err != nil {
-			log.Fatalf("Error setting tuner manual gain to %d: %s", dongle.gain)
+			fmt.Fprintf(os.Stderr, "Error setting tuner manual gain to %d: %s\n", dongle.gain)
+			return
 		}
 	}
 
 	if dongle.ppmError > 0 {
 		err = dongle.dev.SetFreqCorrection(dongle.ppmError)
 		if err != nil {
-			log.Fatalf("Error setting frequency correction to %d: %s", dongle.ppmError, err)
+			fmt.Fprintf(os.Stderr, "Error setting frequency correction to %d: %s\n", dongle.ppmError, err)
+			return
 		}
 	}
 
@@ -458,16 +486,39 @@ func main() {
 	} else {
 		output.file, err = os.OpenFile(output.filename, os.O_RDWR|os.O_APPEND, 0660)
 		if err != nil {
-			log.Fatalln(err)
+			fmt.Fprintln(os.Stderr, err)
 		}
 	}
 	defer output.file.Close()
 
-	/* Reset endpoint before we start reading from it (mandatory) */
+	// Reset endpoint before we start reading from it (mandatory)
 	err = dongle.dev.ResetBuffer()
 	if err != nil {
-		log.Fatalln(err)
+		fmt.Fprintln(os.Stderr, err)
 	}
 
-	log.Printf("Exiting...\n")
+	signalChan := make(chan os.Signal, 1)
+	quit := make(exitChan)
+	signal.Notify(signalChan, os.Interrupt)
+	go func() {
+		for _ = range signalChan {
+			fmt.Fprintln(os.Stderr, "\nReceived an interrupt, stopping services...")
+			close(quit)
+		}
+	}()
+	var wg sync.WaitGroup
+
+	wg.Add(4)
+
+	go controllerRoutine(&wg, quit)
+	//time.Sleep(1)
+	go outputRoutine(&wg, quit)
+	go demodRoutine(&wg, quit)
+	go dongleRoutine(&wg, quit)
+
+	dongle.dev.CancelAsync()
+
+	wg.Wait()
+
+	fmt.Fprintf(os.Stderr, "Exiting...\n")
 }

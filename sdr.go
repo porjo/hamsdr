@@ -81,6 +81,22 @@ func nearestGain(dev *rtl.Context, targetGain int) (nearest int, err error) {
 	return
 }
 
+func rotate90(buf []byte) {
+	var tmp byte
+	for i := 0; i < len(buf); i += 8 {
+		tmp = 255 - buf[i+3]
+		buf[i+3] = buf[i+2]
+		buf[i+2] = tmp
+
+		buf[i+4] = 255 - buf[i+4]
+		buf[i+5] = 255 - buf[i+5]
+
+		tmp = 255 - buf[i+6]
+		buf[i+6] = buf[i+7]
+		buf[i+7] = tmp
+	}
+}
+
 func optimalSettings(freq, rate int) {
 	// giant ball of hacks
 	// seems unable to do a single pass, 2:1

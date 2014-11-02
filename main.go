@@ -21,7 +21,7 @@
 package main
 
 import (
-	//	"bytes"
+	"bufio"
 	"encoding/binary"
 	"flag"
 	"fmt"
@@ -30,10 +30,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	//	"time"
+	"time"
 
 	rtl "github.com/jpoirier/gortlsdr"
 )
+
+var dongleTimer time.Time
 
 const (
 	defaultSampleRate = 24000
@@ -48,6 +50,7 @@ const (
 	frequenciesLimit = 1000
 )
 
+// used to parse multiple -f params
 type frequencies []uint32
 type exitChan chan struct{}
 
@@ -145,42 +148,38 @@ func init() {
 	controller.hopChan = make(chan bool)
 }
 
-func (f frequencies) String() string {
-	return fmt.Sprintf("%d", f)
-}
+func setFreqs(val string) (freqs frequencies, err error) {
+	if val == "" {
+		return
+	}
 
-func (f *frequencies) Set(val string) (err error) {
-	var i int
-	var start, stop, step int
+	var freq uint32
+	var start, stop, step uint32
 
 	step = 25000
 
 	bits := strings.Split(val, ":")
 
-	fmt.Fprintf(os.Stderr, "bits len %d\n", len(bits))
-
 	switch len(bits) {
 	case 1:
-		i, err = strconv.Atoi(bits[0])
+		freq, err = freqHz(bits[0])
 		if err != nil {
 			return
 		}
-		freqs := *f
-		freqs = append(freqs, uint32(i))
-		*f = freqs
+		freqs = append(freqs, freq)
 		return
 	case 3:
-		step, err = strconv.Atoi(bits[2])
+		step, err = freqHz(bits[2])
 		if err != nil {
 			return
 		}
 		fallthrough
 	case 2:
-		start, err = strconv.Atoi(bits[0])
+		start, err = freqHz(bits[0])
 		if err != nil {
 			return
 		}
-		stop, err = strconv.Atoi(bits[1])
+		stop, err = freqHz(bits[1])
 		if err != nil {
 			return
 		}
@@ -190,12 +189,37 @@ func (f *frequencies) Set(val string) (err error) {
 	}
 
 	for j := start; j <= stop; j += step {
-		freqs := *f
 		if len(freqs) > frequenciesLimit {
 			break
 		}
-		freqs = append(freqs, uint32(j))
-		*f = freqs
+		freqs = append(freqs, j)
+	}
+
+	return
+}
+
+// Convert frequency string to Hz
+// 90.2M = 90200000
+// 25K = 25000
+func freqHz(freqStr string) (freq uint32, err error) {
+	var u64 uint64
+	upper := strings.ToUpper(freqStr)
+
+	switch {
+	case strings.HasSuffix(upper, "K"):
+		upper = strings.TrimSuffix(upper, "K")
+		u64, err = strconv.ParseUint(upper, 10, 32)
+		freq = uint32(u64 * 1e3)
+	case strings.HasSuffix(upper, "M"):
+		upper = strings.TrimSuffix(upper, "M")
+		u64, err = strconv.ParseUint(upper, 10, 32)
+		freq = uint32(u64 * 1e6)
+	default:
+		if last := len(upper) - 1; last >= 0 {
+			upper = upper[:last]
+		}
+		u64, err = strconv.ParseUint(upper, 10, 32)
+		freq = uint32(u64)
 	}
 	return
 }
@@ -209,11 +233,9 @@ func rtlsdrCallback(buf []byte, ctx *rtl.UserCtx) {
 		}
 		dongle.mute = 0
 	}
-	/*
-		if dongleS.offsetTuning {
-			//rotate_90(buf, len)
-		}
-	*/
+	if !dongle.offsetTuning {
+		rotate90(buf)
+	}
 	buf16 := make([]int16, len(buf))
 	for i := range buf {
 		buf16[i] = int16(buf[i]) - 127
@@ -223,10 +245,8 @@ func rtlsdrCallback(buf []byte, ctx *rtl.UserCtx) {
 	dongle.lpChan <- buf16
 }
 
-// run as goroutine
 // ReadAsync blocks until CancelAsync
 func dongleRoutine(wg *sync.WaitGroup) {
-
 	defer wg.Done()
 	err := dongle.dev.ReadAsync(rtlsdrCallback, nil, rtl.DefaultAsyncBufNumber, rtl.DefaultBufLength)
 	if err != nil {
@@ -238,40 +258,35 @@ func dongleRoutine(wg *sync.WaitGroup) {
 	fmt.Fprintf(os.Stderr, "Returning from dongleRoutine\n")
 }
 
-// run as goroutine
 func demodRoutine(wg *sync.WaitGroup) {
-
 	var ok bool
 
 	defer wg.Done()
 
 	for {
-		select {
+		demod.lowpassed, ok = <-dongle.lpChan
 
-		case demod.lowpassed, ok = <-dongle.lpChan:
-
-			if !ok {
-				close(output.resultChan)
-				close(controller.hopChan)
-				fmt.Fprintf(os.Stderr, "Returning from demodRoutine\n")
-				return
-			}
-
-			//fmt.Fprintf(os.Stderr, "demod, lp %x %x, len %d\n", lp[0], lp[1], len(lp))
-			demod.fullDemod()
-
-			if demod.squelchLevel > 0 && demod.squelchHits > demod.conseqSquelch {
-				// hair trigger
-				demod.squelchHits = demod.conseqSquelch + 1
-				controller.hopChan <- true
-				continue
-			}
-			//fmt.Fprintf(os.Stderr, "demod, result %x %x, len %d\n", d.result[0], d.result[1], len(d.result))
-			//memcpy(o->result, d->result, 2*d->result_len);
-			var result []int16
-			result = append(result, demod.result...)
-			output.resultChan <- result
+		if !ok {
+			close(output.resultChan)
+			close(controller.hopChan)
+			fmt.Fprintf(os.Stderr, "Returning from demodRoutine\n")
+			return
 		}
+
+		//fmt.Fprintf(os.Stderr, "demod, lp %x %x, len %d\n", lp[0], lp[1], len(lp))
+		demod.fullDemod()
+
+		if demod.squelchLevel > 0 && demod.squelchHits > demod.conseqSquelch {
+			// hair trigger
+			demod.squelchHits = demod.conseqSquelch + 1
+			controller.hopChan <- true
+			continue
+		}
+		//fmt.Fprintf(os.Stderr, "demod, result %x %x, len %d\n", d.result[0], d.result[1], len(d.result))
+		//memcpy(o->result, d->result, 2*d->result_len);
+		var result []int16
+		result = append(result, demod.result...)
+		output.resultChan <- result
 	}
 }
 
@@ -306,28 +321,25 @@ func controllerRoutine(wg *sync.WaitGroup) {
 	fmt.Fprintf(os.Stderr, "Output at %d Hz.\n", demod.rateIn/demod.postDownsample)
 
 	for {
-		select {
-
-		case _, ok := <-controller.hopChan:
-
-			if !ok {
-				fmt.Fprintf(os.Stderr, "Returning from controllerRoutine\n")
-				return
-			}
-
-			if len(s.freqs) <= 1 {
-				continue
-			}
-			// hacky hopping
-			s.freqNow = (s.freqNow + 1) % len(s.freqs)
-			optimalSettings(int(s.freqs[s.freqNow]), demod.rateIn)
-			err = dongle.dev.SetCenterFreq(int(dongle.freq))
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error setting frequency %d\n", dongle.freq)
-				return
-			}
-			dongle.mute = bufferDump
+		_, ok := <-controller.hopChan
+		if !ok {
+			fmt.Fprintf(os.Stderr, "Returning from controllerRoutine\n")
+			return
 		}
+
+		if len(s.freqs) <= 1 {
+			continue
+		}
+		// hacky hopping
+		s.freqNow = (s.freqNow + 1) % len(s.freqs)
+		//fmt.Fprintf(os.Stderr, "controller, freqnow %d\n", s.freqs[s.freqNow])
+		optimalSettings(int(s.freqs[s.freqNow]), demod.rateIn)
+		err = dongle.dev.SetCenterFreq(int(dongle.freq))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error setting frequency %d\n", dongle.freq)
+			return
+		}
+		dongle.mute = bufferDump
 	}
 }
 
@@ -335,22 +347,18 @@ func outputRoutine(wg *sync.WaitGroup) {
 	var err error
 
 	defer wg.Done()
+	f := bufio.NewWriter(output.file)
+	defer f.Flush()
 	for {
-		select {
+		result, ok := <-output.resultChan
+		if !ok {
+			fmt.Fprintf(os.Stderr, "Returning from outputRoutine\n")
+			return
+		}
 
-		case result, ok := <-output.resultChan:
-
-			if !ok {
-				fmt.Fprintf(os.Stderr, "Returning from outputRoutine\n")
-				return
-			}
-
-			//fmt.Fprintf(os.Stderr, "output, result len %d\n", len(result))
-			// TODO: use timed wait and pad out under runs
-			err = binary.Write(output.file, binary.LittleEndian, result)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "output write error %s\n", err)
-			}
+		err = binary.Write(f, binary.LittleEndian, result)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "output write error: %s\n", err)
 		}
 	}
 }
@@ -376,10 +384,26 @@ func (d *demodState) fullDemod() {
 	d.modeDemod(d)
 }
 
+func (f *frequencies) String() string {
+	return fmt.Sprintf("%d", *f)
+}
+
+func (f *frequencies) Set(val string) error {
+	freqs, err := setFreqs(val)
+	if err != nil {
+		return err
+	}
+
+	*f = append(*f, freqs...)
+
+	return nil
+}
+
 func main() {
 	var err error
 
 	flag.IntVar(&dongle.devIndex, "d", 0, "dongle device index")
+	//freqStr := flag.String("f", "", "frequency or range of frequencies, and step e.g 92900:100100:25000")
 	flag.Var(&controller.freqs, "f", "frequency or range of frequencies, and step e.g 92900:100100:25000")
 	flag.IntVar(&demod.squelchLevel, "l", 0, "squelch level")
 	rateIn := flag.Int("s", 0, "sample rate")
@@ -387,6 +411,14 @@ func main() {
 	demodMode := flag.String("M", "am", "demodulation mode [fm, am]")
 
 	flag.Parse()
+
+	/*
+		controller.freqs, err = setFreqs(*freqStr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to parse frequencies %s\n", err)
+			return
+		}
+	*/
 
 	switch *demodMode {
 	case "fm":
@@ -399,16 +431,18 @@ func main() {
 		demod.rateIn = *rateIn
 	}
 
+	demod.rateOut = demod.rateIn
+
 	if len(controller.freqs) == 0 {
 		controller.freqs = append(controller.freqs, 100000000)
 	}
 
-	demod.rateOut = demod.rateIn
-
-	if len(controller.freqs) == 0 {
-		fmt.Fprintln(os.Stderr, "Please specify a frequency.")
-		return
-	}
+	/*
+		if len(controller.freqs) == 0 {
+			fmt.Fprintln(os.Stderr, "Please specify a frequency.")
+			return
+		}
+	*/
 
 	if len(controller.freqs) >= frequenciesLimit {
 		fmt.Fprintf(os.Stderr, "Too many channels, maximum %d.\n", frequenciesLimit)
@@ -420,7 +454,7 @@ func main() {
 		return
 	}
 
-	/* quadruple sample_rate to limit to Δθ to ±π/2 */
+	// quadruple sample_rate to limit to Δθ to ±π/2
 	demod.rateIn *= demod.postDownsample
 
 	if output.rate == 0 {
@@ -446,7 +480,7 @@ func main() {
 	}
 	defer dongle.dev.Close()
 
-	/* Set the tuner gain */
+	// Set the tuner gain
 	if dongle.gain == autoGain {
 		fmt.Fprintf(os.Stderr, "Setting auto gain\n")
 		err = dongle.dev.SetTunerGainMode(false)
@@ -519,7 +553,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error canceling async %s\n", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "Wainting for goroutines to finish...\n")
+	fmt.Fprintf(os.Stderr, "Waiting for goroutines to finish...\n")
 	wg.Wait()
 
 	fmt.Fprintf(os.Stderr, "Exiting...\n")

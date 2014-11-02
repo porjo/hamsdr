@@ -202,24 +202,24 @@ func setFreqs(val string) (freqs frequencies, err error) {
 // 90.2M = 90200000
 // 25K = 25000
 func freqHz(freqStr string) (freq uint32, err error) {
-	var u64 uint64
+	var f64 float64
 	upper := strings.ToUpper(freqStr)
 
 	switch {
 	case strings.HasSuffix(upper, "K"):
 		upper = strings.TrimSuffix(upper, "K")
-		u64, err = strconv.ParseUint(upper, 10, 32)
-		freq = uint32(u64 * 1e3)
+		f64, err = strconv.ParseFloat(upper, 32)
+		freq = uint32(f64 * 1e3)
 	case strings.HasSuffix(upper, "M"):
 		upper = strings.TrimSuffix(upper, "M")
-		u64, err = strconv.ParseUint(upper, 10, 32)
-		freq = uint32(u64 * 1e6)
+		f64, err = strconv.ParseFloat(upper, 32)
+		freq = uint32(f64 * 1e6)
 	default:
 		if last := len(upper) - 1; last >= 0 {
 			upper = upper[:last]
 		}
-		u64, err = strconv.ParseUint(upper, 10, 32)
-		freq = uint32(u64)
+		f64, err = strconv.ParseFloat(upper, 32)
+		freq = uint32(f64)
 	}
 	return
 }
@@ -308,6 +308,8 @@ func controllerRoutine(wg *sync.WaitGroup) {
 		fmt.Fprintf(os.Stderr, "Error setting frequency %d\n", dongle.freq)
 		return
 	}
+
+	fmt.Fprintf(os.Stderr, "Tuned to %d Hz\n", dongle.freq)
 	fmt.Fprintf(os.Stderr, "Oversampling input by: %dx.\n", demod.downsample)
 	fmt.Fprintf(os.Stderr, "Oversampling output by: %dx.\n", demod.postDownsample)
 	fmt.Fprintf(os.Stderr, "Buffer size: %0.2fms\n", 1000*0.5*float32(actualBufLen)/float32(dongle.rate))
@@ -406,7 +408,7 @@ func main() {
 	//freqStr := flag.String("f", "", "frequency or range of frequencies, and step e.g 92900:100100:25000")
 	flag.Var(&controller.freqs, "f", "frequency or range of frequencies, and step e.g 92900:100100:25000")
 	flag.IntVar(&demod.squelchLevel, "l", 0, "squelch level")
-	rateIn := flag.Int("s", 0, "sample rate")
+	rateStr := flag.String("s", "24k", "sample rate")
 	flag.IntVar(&dongle.ppmError, "p", 0, "ppm error")
 	demodMode := flag.String("M", "am", "demodulation mode [fm, am]")
 
@@ -427,11 +429,14 @@ func main() {
 		demod.modeDemod = amDemod
 	}
 
-	if *rateIn > 0 {
-		demod.rateIn = *rateIn
+	var rateIn uint32
+	rateIn, err = freqHz(*rateStr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to parse sample rate %s\n", err)
+		return
 	}
-
-	demod.rateOut = demod.rateIn
+	demod.rateIn = int(rateIn)
+	demod.rateOut = int(rateIn)
 
 	if len(controller.freqs) == 0 {
 		controller.freqs = append(controller.freqs, 100000000)
@@ -507,6 +512,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error setting frequency correction to %d: %s\n", dongle.ppmError, err)
 			return
 		}
+
 	}
 
 	if output.filename == "-" {

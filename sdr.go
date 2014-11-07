@@ -19,9 +19,12 @@ package main
 import (
 	"fmt"
 	"math"
+	//	"os"
 
 	rtl "github.com/jpoirier/gortlsdr"
 )
+
+var deemphAvg int
 
 /*
 var cic_9_tables = [10][10]int{
@@ -38,14 +41,13 @@ var cic_9_tables = [10][10]int{
 }
 */
 
-/*
 // https://gist.github.com/DavidVaini/10308388
-func Round(val float64, roundOn float64, places int) (newVal float64) {
+func round(val float64, places int) (newVal float64) {
 	var round float64
 	pow := math.Pow(10, float64(places))
 	digit := pow * val
 	_, div := math.Modf(digit)
-	if div >= roundOn {
+	if div >= .5 {
 		round = math.Ceil(digit)
 	} else {
 		round = math.Floor(digit)
@@ -53,8 +55,8 @@ func Round(val float64, roundOn float64, places int) (newVal float64) {
 	newVal = round / pow
 	return
 }
-*/
 
+// Can't use rtl.Context as method receiver, get error: "expected (unqualified) identifier"
 //func (dev *rtl.Context) nearestGain(targetGain int) (err error, nearest int) {
 func nearestGain(dev *rtl.Context, targetGain int) (nearest int, err error) {
 	err = dev.SetTunerGainMode(true)
@@ -124,11 +126,10 @@ func optimalSettings(freq, rate int) {
 	dongle.rate = uint32(captureRate)
 }
 
-// TODO: fix this extreme laziness
 func amDemod(am *demodState) {
 	var pcm int16
 	lp := am.lowpassed
-	am.result = make([]int16, len(lp))
+	am.result = make([]int16, len(lp)/2)
 	r := am.result
 	for i := 0; i < len(am.lowpassed); i += 2 {
 		// hypot uses floats but won't overflow
@@ -139,49 +140,68 @@ func amDemod(am *demodState) {
 	}
 	// lowpass? (3khz)  highpass?  (dc)
 }
-func polarDiscriminant(ar, aj, br, bj int16) int {
-	var cr, cj int16
+
+func polarDiscriminant(ar, aj, br, bj int) int {
+	var cr, cj int
 	var angle float64
 	cr = ar*br - aj*bj
 	cj = aj*br + ar*bj
 	angle = math.Atan2(float64(cj), float64(cr))
-	return int(angle / 3.14159 * (1 << 14))
+	return int(angle / math.Pi * (1 << 14))
+}
+
+func polarDiscFast(ar, aj, br, bj int) int {
+	var cr, cj int
+	cr = ar*br - aj*bj
+	cj = aj*br + ar*bj
+	return fastAtan2(cj, cr)
+}
+
+// pre scaled for int16
+func fastAtan2(y, x int) int {
+	var pi4, pi34, yabs, angle int
+	pi4 = 1 << 12
+	pi34 = 3 * (1 << 12) // note pi = 1<<14
+	if x == 0 && y == 0 {
+		return 0
+	}
+	yabs = y
+	if yabs < 0 {
+		yabs = -yabs
+	}
+	if x >= 0 {
+		angle = pi4 - pi4*(x-yabs)/(x+yabs)
+	} else {
+		angle = pi34 - pi4*(x+yabs)/(yabs-x)
+	}
+	if y < 0 {
+		return -angle
+	}
+	return angle
 }
 
 func fmDemod(fm *demodState) {
 	var i, pcm int
 	lp := fm.lowpassed
 	lpLen := len(fm.lowpassed)
-	pcm = polarDiscriminant(lp[0], lp[1], int16(fm.preR), int16(fm.preJ))
-	fm.result = make([]int16, lpLen)
+	pcm = polarDiscriminant(int(lp[0]), int(lp[1]), fm.preR, fm.preJ)
+	fm.result = make([]int16, lpLen/2)
 	fm.result[0] = int16(pcm)
 	for i = 2; i < (lpLen - 1); i += 2 {
-		pcm = polarDiscriminant(lp[i], lp[i+1], lp[i-2], lp[i-1])
+		switch fm.customAtan {
+		case 0:
+			pcm = polarDiscriminant(int(lp[i]), int(lp[i+1]), int(lp[i-2]), int(lp[i-1]))
+		case 1:
+			pcm = polarDiscFast(int(lp[i]), int(lp[i+1]), int(lp[i-2]), int(lp[i-1]))
+		}
+
 		fm.result[i/2] = int16(pcm)
 	}
 	fm.preR = int(lp[lpLen-2])
 	fm.preJ = int(lp[lpLen-1])
 }
 
-// largely lifted from rtl_power
-func rms(samples []int16, step int) int {
-	var i int
-	var p, t, s int32
-	var dc, res float32
-
-	l := len(samples)
-
-	for i = 0; i < l; i += step {
-		s = int32(samples[i])
-		t += s
-		p += s * s
-	}
-	/* correct for dc offset in squares */
-	dc = float32(t*int32(step)) / float32(l)
-	res = float32(t)*2*dc - dc*dc*float32(l)
-
-	return int(math.Sqrt(float64((float32(p) - res) / float32(l))))
-}
+/*
 
 // for half of interleaved data
 func fifthOrder(data []int16, startIdx int, hist [6]int16) {
@@ -216,7 +236,6 @@ func fifthOrder(data []int16, startIdx int, hist [6]int16) {
 	hist[5] = f
 }
 
-/*
 // Okay, not at all generic.  Assumes length 9, fix that eventually.
 func genericFir(data []int16, fir int, hist [6]int16)
 {
@@ -243,6 +262,26 @@ func genericFir(data []int16, fir int, hist [6]int16)
 }
 */
 
+// largely lifted from rtl_power
+func rms(samples []int16, step int) int {
+	var i int
+	var p, t, s int32
+	var dc, res float32
+
+	l := len(samples)
+
+	for i = 0; i < l; i += step {
+		s = int32(samples[i])
+		t += s
+		p += s * s
+	}
+	// correct for dc offset in squares
+	dc = float32(t*int32(step)) / float32(l)
+	res = float32(t)*2*dc - dc*dc*float32(l)
+
+	return int(math.Sqrt(float64((float32(p) - res) / float32(l))))
+}
+
 // simple square window FIR
 func lowPass(d *demodState) {
 	var i, i2 int
@@ -261,5 +300,41 @@ func lowPass(d *demodState) {
 		d.nowJ = 0
 		i2 += 2
 	}
-	d.lowpassed = d.lowpassed[0:i2]
+	d.lowpassed = d.lowpassed[:i2]
+}
+
+// simple square window FIR
+// add support for upsampling?
+func lowPassReal(s *demodState) {
+	var i, i2 int
+	fast := s.rateOut
+	slow := s.rateOut2
+	for i < len(s.result) {
+		s.nowLpr += int(s.result[i])
+		i++
+		s.prevLprIndex += slow
+		if s.prevLprIndex < fast {
+			continue
+		}
+		s.result[i2] = int16(s.nowLpr / (fast / slow))
+		s.prevLprIndex -= fast
+		s.nowLpr = 0
+		i2 += 1
+	}
+	s.result = s.result[:i2]
+}
+
+func deemphFilter(fm *demodState) {
+	var d int
+	// de-emph IIR
+	// avg = avg * (1 - alpha) + sample * alpha;
+	for i := 0; i < len(fm.result); i++ {
+		d = int(fm.result[i]) - deemphAvg
+		if d > 0 {
+			deemphAvg += (d + fm.deemphA/2) / fm.deemphA
+		} else {
+			deemphAvg += (d - fm.deemphA/2) / fm.deemphA
+		}
+		fm.result[i] = int16(deemphAvg)
+	}
 }

@@ -21,10 +21,11 @@
 package main
 
 import (
-	"bufio"
+	//	"bufio"
 	"encoding/binary"
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"os/signal"
 	"strconv"
@@ -69,16 +70,15 @@ type dongleState struct {
 }
 
 type demodState struct {
-	lowpassed []int16
-	lpIHist   [10][6]int16
-	lpQHist   [10][6]int16
-	result    []int16 // ?
-	//resultLen  int                  // ?
-	droopIHist [9]int16
-	droopQHist [9]int16
-	rateIn     int
-	rateOut    int
-	//rateOut2           int
+	lowpassed          []int16
+	lpIHist            [10][6]int16
+	lpQHist            [10][6]int16
+	result             []int16 // ?
+	droopIHist         [9]int16
+	droopQHist         [9]int16
+	rateIn             int
+	rateOut            int
+	rateOut2           int
 	nowR               int
 	nowJ               int
 	preR               int
@@ -94,7 +94,8 @@ type demodState struct {
 	downsamplePasses   int
 	compFirSize        int
 	customAtan         int
-	deemph, deemphA    int
+	deemph             bool
+	deemphA            int
 	nowLpr             int
 	prevLprIndex       int
 	dcBlock, dcAvg     int
@@ -113,6 +114,7 @@ type controllerState struct {
 	freqs   frequencies
 	freqNow int
 	edge    int
+	wbMode  bool
 
 	hopChan chan bool
 }
@@ -208,17 +210,17 @@ func freqHz(freqStr string) (freq uint32, err error) {
 	switch {
 	case strings.HasSuffix(upper, "K"):
 		upper = strings.TrimSuffix(upper, "K")
-		f64, err = strconv.ParseFloat(upper, 32)
+		f64, err = strconv.ParseFloat(upper, 64)
 		freq = uint32(f64 * 1e3)
 	case strings.HasSuffix(upper, "M"):
 		upper = strings.TrimSuffix(upper, "M")
-		f64, err = strconv.ParseFloat(upper, 32)
+		f64, err = strconv.ParseFloat(upper, 64)
 		freq = uint32(f64 * 1e6)
 	default:
 		if last := len(upper) - 1; last >= 0 {
 			upper = upper[:last]
 		}
-		f64, err = strconv.ParseFloat(upper, 32)
+		f64, err = strconv.ParseFloat(upper, 64)
 		freq = uint32(f64)
 	}
 	return
@@ -240,7 +242,7 @@ func rtlsdrCallback(buf []byte, ctx *rtl.UserCtx) {
 	for i := range buf {
 		buf16[i] = int16(buf[i]) - 127
 	}
-	//fmt.Fprintf(os.Stderr, "buf %x %x %x %x, buf16 %x %x %x %x, buf len %d\n", buf[0], buf[1], buf[2], buf[3], uint16(buf16[0]), uint16(buf16[1]), uint16(buf16[2]), uint16(buf16[3]), len(buf))
+	//fmt.Fprintf(os.Stderr, "2 buf %x %x %x %x, buf16 %x %x %x %x, buf len %d\n", buf[0], buf[1], buf[2], buf[3], uint16(buf16[0]), uint16(buf16[1]), uint16(buf16[2]), uint16(buf16[3]), len(buf))
 
 	dongle.lpChan <- buf16
 }
@@ -248,7 +250,8 @@ func rtlsdrCallback(buf []byte, ctx *rtl.UserCtx) {
 // ReadAsync blocks until CancelAsync
 func dongleRoutine(wg *sync.WaitGroup) {
 	defer wg.Done()
-	err := dongle.dev.ReadAsync(rtlsdrCallback, nil, rtl.DefaultAsyncBufNumber, rtl.DefaultBufLength)
+	//err := dongle.dev.ReadAsync(rtlsdrCallback, nil, 0, rtl.DefaultBufLength)
+	err := dongle.dev.ReadAsync(rtlsdrCallback, nil, 0, 0)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ReadAsync failed, err %s\n", err)
 	}
@@ -273,7 +276,6 @@ func demodRoutine(wg *sync.WaitGroup) {
 			return
 		}
 
-		//fmt.Fprintf(os.Stderr, "demod, lp %x %x, len %d\n", lp[0], lp[1], len(lp))
 		demod.fullDemod()
 
 		if demod.squelchLevel > 0 && demod.squelchHits > demod.conseqSquelch {
@@ -282,22 +284,24 @@ func demodRoutine(wg *sync.WaitGroup) {
 			controller.hopChan <- true
 			continue
 		}
-		//fmt.Fprintf(os.Stderr, "demod, result %x %x, len %d\n", d.result[0], d.result[1], len(d.result))
-		//memcpy(o->result, d->result, 2*d->result_len);
-		var result []int16
-		result = append(result, demod.result...)
+		result := make([]int16, len(demod.result))
+		copy(result, demod.result)
 		output.resultChan <- result
 	}
 }
 
-// thoughts for multiple dongles
-// might be no good using a controller thread if retune/rate blocks
 func controllerRoutine(wg *sync.WaitGroup) {
 	var err error
 
 	defer wg.Done()
 
 	s := controller
+
+	if s.wbMode {
+		for i := range s.freqs {
+			s.freqs[i] += 16000
+		}
+	}
 
 	// set up primary channel
 	optimalSettings(int(s.freqs[0]), demod.rateIn)
@@ -320,6 +324,7 @@ func controllerRoutine(wg *sync.WaitGroup) {
 		fmt.Fprintf(os.Stderr, "Error setting sample rate %d\n", dongle.rate)
 		return
 	}
+	fmt.Fprintf(os.Stderr, "Sampling at %d S/s.\n", dongle.rate)
 	fmt.Fprintf(os.Stderr, "Output at %d Hz.\n", demod.rateIn/demod.postDownsample)
 
 	for {
@@ -349,8 +354,6 @@ func outputRoutine(wg *sync.WaitGroup) {
 	var err error
 
 	defer wg.Done()
-	f := bufio.NewWriter(output.file)
-	defer f.Flush()
 	for {
 		result, ok := <-output.resultChan
 		if !ok {
@@ -358,7 +361,7 @@ func outputRoutine(wg *sync.WaitGroup) {
 			return
 		}
 
-		err = binary.Write(f, binary.LittleEndian, result)
+		err = binary.Write(output.file, binary.LittleEndian, result)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "output write error: %s\n", err)
 		}
@@ -384,6 +387,12 @@ func (d *demodState) fullDemod() {
 	}
 
 	d.modeDemod(d)
+	if d.deemph {
+		deemphFilter(d)
+	}
+	if d.rateOut2 > 0 {
+		lowPassReal(d)
+	}
 }
 
 func (f *frequencies) String() string {
@@ -405,49 +414,47 @@ func main() {
 	var err error
 
 	flag.IntVar(&dongle.devIndex, "d", 0, "dongle device index")
-	//freqStr := flag.String("f", "", "frequency or range of frequencies, and step e.g 92900:100100:25000")
-	flag.Var(&controller.freqs, "f", "frequency or range of frequencies, and step e.g 92900:100100:25000")
+	flag.Var(&controller.freqs, "f", "frequency or range of frequencies, and step e.g 92.9M:100.1M:25k")
 	flag.IntVar(&demod.squelchLevel, "l", 0, "squelch level")
 	rateStr := flag.String("s", "24k", "sample rate")
 	flag.IntVar(&dongle.ppmError, "p", 0, "ppm error")
+	flag.IntVar(&dongle.gain, "g", autoGain, "gain level (defaults to autogain)")
 	demodMode := flag.String("M", "am", "demodulation mode [fm, am]")
 
 	flag.Parse()
 
-	/*
-		controller.freqs, err = setFreqs(*freqStr)
+	if *rateStr != "" {
+		var rateIn uint32
+		rateIn, err = freqHz(*rateStr)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to parse frequencies %s\n", err)
+			fmt.Fprintf(os.Stderr, "Failed to parse sample rate %s\n", err)
 			return
 		}
-	*/
+		demod.rateIn = int(rateIn)
+		demod.rateOut = int(rateIn)
+	}
 
 	switch *demodMode {
 	case "fm":
 		demod.modeDemod = fmDemod
+	case "wbfm":
+		demod.modeDemod = fmDemod
+		controller.wbMode = true
+		demod.rateIn = 170000
+		demod.rateOut = 170000
+		demod.rateOut2 = 32000
+		demod.customAtan = 1
+		//demod.post_downsample = 4;
+		demod.deemph = true
+		demod.squelchLevel = 0
 	default:
 		demod.modeDemod = amDemod
 	}
 
-	var rateIn uint32
-	rateIn, err = freqHz(*rateStr)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to parse sample rate %s\n", err)
+	if len(controller.freqs) == 0 {
+		fmt.Fprintln(os.Stderr, "Please specify a frequency.")
 		return
 	}
-	demod.rateIn = int(rateIn)
-	demod.rateOut = int(rateIn)
-
-	if len(controller.freqs) == 0 {
-		controller.freqs = append(controller.freqs, 100000000)
-	}
-
-	/*
-		if len(controller.freqs) == 0 {
-			fmt.Fprintln(os.Stderr, "Please specify a frequency.")
-			return
-		}
-	*/
 
 	if len(controller.freqs) >= frequenciesLimit {
 		fmt.Fprintf(os.Stderr, "Too many channels, maximum %d.\n", frequenciesLimit)
@@ -466,10 +473,6 @@ func main() {
 		output.rate = demod.rateOut
 	}
 
-	if len(controller.freqs) > 1 {
-		demod.terminateOnSquelch = 0
-	}
-
 	if flag.Arg(0) != "" {
 		output.filename = flag.Arg(0)
 	} else {
@@ -485,6 +488,12 @@ func main() {
 	}
 	defer dongle.dev.Close()
 
+	if demod.deemph {
+		demod.deemphA = int(
+			round(1.0/(1.0-math.Exp(-1.0/(float64(demod.rateOut)*75e-6))), 0),
+		)
+		fmt.Fprintf(os.Stderr, "Deempha %d\n", demod.deemphA)
+	}
 	// Set the tuner gain
 	if dongle.gain == autoGain {
 		fmt.Fprintf(os.Stderr, "Setting auto gain\n")
@@ -494,6 +503,7 @@ func main() {
 			return
 		}
 	} else {
+		dongle.gain *= 10
 		dongle.gain, err = nearestGain(dongle.dev, dongle.gain)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error getting nearest gain to %d: %s\n", dongle.gain, err)
@@ -518,7 +528,7 @@ func main() {
 	if output.filename == "-" {
 		output.file = os.Stdout
 	} else {
-		output.file, err = os.OpenFile(output.filename, os.O_RDWR|os.O_APPEND, 0660)
+		output.file, err = os.Create(output.filename)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return
@@ -530,6 +540,7 @@ func main() {
 	err = dongle.dev.ResetBuffer()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
+		return
 	}
 
 	signalChan := make(chan os.Signal, 1)

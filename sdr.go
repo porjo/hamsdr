@@ -41,6 +41,7 @@ var cic_9_tables = [10][10]int{
 }
 */
 
+/*
 // https://gist.github.com/DavidVaini/10308388
 func round(val float64, places int) (newVal float64) {
 	var round float64
@@ -54,6 +55,15 @@ func round(val float64, places int) (newVal float64) {
 	}
 	newVal = round / pow
 	return
+}
+*/
+
+func round(x float64) float64 {
+	if x > 0.0 {
+		return math.Floor(x + 0.5)
+	} else {
+		return math.Ceil(x - 0.5)
+	}
 }
 
 // Can't use rtl.Context as method receiver, get error: "expected (unqualified) identifier"
@@ -97,33 +107,6 @@ func rotate90(buf []byte) {
 		buf[i+6] = buf[i+7]
 		buf[i+7] = tmp
 	}
-}
-
-func optimalSettings(freq, rate int) {
-	// giant ball of hacks
-	// seems unable to do a single pass, 2:1
-	var captureFreq, captureRate int
-	demod.downsample = (1000000 / demod.rateIn) + 1
-	if demod.downsamplePasses > 0 {
-		demod.downsamplePasses = int(math.Log2(float64(demod.downsample)) + 1)
-		demod.downsample = 1 << uint(demod.downsamplePasses)
-	}
-	captureFreq = freq
-	captureRate = demod.downsample * demod.rateIn
-	if !dongle.offsetTuning {
-		captureFreq = freq + captureRate/4
-	}
-	captureFreq += controller.edge * demod.rateIn / 2
-	demod.outputScale = (1 << 15) / (128 * demod.downsample)
-	if demod.outputScale < 1 {
-		demod.outputScale = 1
-	}
-	fm := fmDemod
-	if &demod.modeDemod == &fm {
-		demod.outputScale = 1
-	}
-	dongle.freq = uint32(captureFreq)
-	dongle.rate = uint32(captureRate)
 }
 
 func amDemod(am *demodState) {

@@ -28,6 +28,7 @@ import (
 	"math"
 	"os"
 	"os/signal"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -290,6 +291,32 @@ func demodRoutine(wg *sync.WaitGroup) {
 	}
 }
 
+func optimalSettings(freq int) {
+	// giant ball of hacks
+	// seems unable to do a single pass, 2:1
+	var captureFreq, captureRate int
+	demod.downsample = (1000000 / demod.rateIn) + 1
+	if demod.downsamplePasses > 0 {
+		demod.downsamplePasses = int(math.Log2(float64(demod.downsample)) + 1)
+		demod.downsample = 1 << uint(demod.downsamplePasses)
+	}
+	captureFreq = freq
+	captureRate = demod.downsample * demod.rateIn
+	if !dongle.offsetTuning {
+		captureFreq = freq + captureRate/4
+	}
+	captureFreq += controller.edge * demod.rateIn / 2
+	demod.outputScale = (1 << 15) / (128 * demod.downsample)
+	if demod.outputScale < 1 {
+		demod.outputScale = 1
+	}
+	if reflect.ValueOf(demod.modeDemod).Pointer() == reflect.ValueOf(fmDemod).Pointer() {
+		demod.outputScale = 1
+	}
+	dongle.freq = uint32(captureFreq)
+	dongle.rate = uint32(captureRate)
+}
+
 func controllerRoutine(wg *sync.WaitGroup) {
 	var err error
 
@@ -304,7 +331,7 @@ func controllerRoutine(wg *sync.WaitGroup) {
 	}
 
 	// set up primary channel
-	optimalSettings(int(s.freqs[0]), demod.rateIn)
+	optimalSettings(int(s.freqs[0]))
 
 	// Set the frequency
 	err = dongle.dev.SetCenterFreq(int(dongle.freq))
@@ -340,7 +367,7 @@ func controllerRoutine(wg *sync.WaitGroup) {
 		// hacky hopping
 		s.freqNow = (s.freqNow + 1) % len(s.freqs)
 		//fmt.Fprintf(os.Stderr, "controller, freqnow %d\n", s.freqs[s.freqNow])
-		optimalSettings(int(s.freqs[s.freqNow]), demod.rateIn)
+		optimalSettings(int(s.freqs[s.freqNow]))
 		err = dongle.dev.SetCenterFreq(int(dongle.freq))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error setting frequency %d\n", dongle.freq)
@@ -490,7 +517,8 @@ func main() {
 
 	if demod.deemph {
 		demod.deemphA = int(
-			round(1.0/(1.0-math.Exp(-1.0/(float64(demod.rateOut)*75e-6))), 0),
+			//round(1.0/(1.0-math.Exp(-1.0/(float64(demod.rateOut)*75e-6))), 0),
+			round(1.0 / (1.0 - math.Exp(-1.0/(float64(demod.rateOut)*75e-6)))),
 		)
 		fmt.Fprintf(os.Stderr, "Deempha %d\n", demod.deemphA)
 	}
@@ -522,7 +550,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error setting frequency correction to %d: %s\n", dongle.ppmError, err)
 			return
 		}
-
+		fmt.Fprintf(os.Stderr, "Tuner error set to %i ppm.\n", dongle.ppmError)
 	}
 
 	if output.filename == "-" {

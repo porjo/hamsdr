@@ -82,10 +82,10 @@ type demodState struct {
 	rateIn             int
 	rateOut            int
 	rateOut2           int
-	nowR               int
-	nowJ               int
-	preR               int
-	preJ               int
+	nowR               int16
+	nowJ               int16
+	preR               int16
+	preJ               int16
 	prevIndex          int
 	downsample         int // min 1, max 256
 	postDownsample     int
@@ -305,8 +305,8 @@ func demodRoutine(wg *sync.WaitGroup) {
 			controller.hopChan <- true
 			continue
 		}
-		result := make([]int16, len(demod.result))
-		copy(result, demod.result)
+		result := make([]int16, len(demod.lowpassed))
+		copy(result, demod.lowpassed)
 		output.resultChan <- result
 	}
 }

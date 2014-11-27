@@ -112,31 +112,31 @@ func rotate90(buf []byte) {
 func amDemod(am *demodState) {
 	var pcm int16
 	lp := am.lowpassed
-	am.result = make([]int16, len(lp)/2)
-	r := am.result
-	for i := 0; i < len(am.lowpassed); i += 2 {
+	lpLen := len(am.lowpassed)
+	for i := 0; i < lpLen; i += 2 {
 		// hypot uses floats but won't overflow
 		//r[i/2] = (int16_t)hypot(lp[i], lp[i+1]);
 		pcm = lp[i] * lp[i]
 		pcm += lp[i+1] * lp[i+1]
-		r[i/2] = int16(math.Sqrt(float64(pcm))) * int16(am.outputScale)
+		am.lowpassed[i/2] = int16(math.Sqrt(float64(pcm))) * int16(am.outputScale)
 	}
 	// lowpass? (3khz)  highpass?  (dc)
+	am.lowpassed = am.lowpassed[:lpLen/2]
 }
 
 func polarDiscriminant(ar, aj, br, bj int) int {
 	var cr, cj int
 	var angle float64
-	cr = ar*br - aj*bj
-	cj = aj*br + ar*bj
+	cr = ar*br - aj*-bj
+	cj = aj*br + ar*-bj
 	angle = math.Atan2(float64(cj), float64(cr))
 	return int(angle / math.Pi * (1 << 14))
 }
 
 func polarDiscFast(ar, aj, br, bj int) int {
 	var cr, cj int
-	cr = ar*br - aj*bj
-	cj = aj*br + ar*bj
+	cr = ar*br - aj*-bj
+	cj = aj*br + ar*-bj
 	return fastAtan2(cj, cr)
 }
 
@@ -167,21 +167,23 @@ func fmDemod(fm *demodState) {
 	var i, pcm int
 	lp := fm.lowpassed
 	lpLen := len(fm.lowpassed)
-	pcm = polarDiscriminant(int(lp[0]), int(lp[1]), fm.preR, fm.preJ)
-	fm.result = make([]int16, lpLen/2)
-	fm.result[0] = int16(pcm)
+	pr := fm.preR
+	pj := fm.preJ
 	for i = 2; i < (lpLen - 1); i += 2 {
 		switch fm.customAtan {
 		case 0:
-			pcm = polarDiscriminant(int(lp[i]), int(lp[i+1]), int(lp[i-2]), int(lp[i-1]))
+			pcm = polarDiscriminant(int(lp[i]), int(lp[i+1]), int(pr), int(pj))
 		case 1:
-			pcm = polarDiscFast(int(lp[i]), int(lp[i+1]), int(lp[i-2]), int(lp[i-1]))
+			pcm = polarDiscFast(int(lp[i]), int(lp[i+1]), int(pr), int(pj))
 		}
+		pr = lp[i]
+		pj = lp[i+1]
 
-		fm.result[i/2] = int16(pcm)
+		fm.lowpassed[i/2] = int16(pcm)
 	}
-	fm.preR = int(lp[lpLen-2])
-	fm.preJ = int(lp[lpLen-1])
+	fm.preR = pr
+	fm.preJ = pj
+	fm.lowpassed = fm.lowpassed[:lpLen/2]
 }
 
 /*
@@ -269,15 +271,15 @@ func rms(samples []int16, step int) int {
 func lowPass(d *demodState) {
 	var i, i2 int
 	for i < len(d.lowpassed) {
-		d.nowR += int(d.lowpassed[i])
-		d.nowJ += int(d.lowpassed[i+1])
+		d.nowR += d.lowpassed[i]
+		d.nowJ += d.lowpassed[i+1]
 		i += 2
 		d.prevIndex++
 		if d.prevIndex < d.downsample {
 			continue
 		}
-		d.lowpassed[i2] = int16(d.nowR)   // * d.output_scale;
-		d.lowpassed[i2+1] = int16(d.nowJ) // * d.output_scale;
+		d.lowpassed[i2] = d.nowR   // * d.output_scale;
+		d.lowpassed[i2+1] = d.nowJ // * d.output_scale;
 		d.prevIndex = 0
 		d.nowR = 0
 		d.nowJ = 0

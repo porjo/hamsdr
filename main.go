@@ -73,10 +73,10 @@ type dongleState struct {
 }
 
 type demodState struct {
-	lowpassed          []int16
-	lpIHist            [10][6]int16
-	lpQHist            [10][6]int16
-	result             []int16 // ?
+	lowpassed []int16
+	lpIHist   [10][6]int16
+	lpQHist   [10][6]int16
+	//result             []int16 // ?
 	droopIHist         [9]int16
 	droopQHist         [9]int16
 	rateIn             int

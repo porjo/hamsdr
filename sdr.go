@@ -294,33 +294,33 @@ func lowPassReal(s *demodState) {
 	var i, i2 int
 	fast := s.rateOut
 	slow := s.rateOut2
-	for i < len(s.result) {
-		s.nowLpr += int(s.result[i])
+	for i < len(s.lowpassed) {
+		s.nowLpr += int(s.lowpassed[i])
 		i++
 		s.prevLprIndex += slow
 		if s.prevLprIndex < fast {
 			continue
 		}
-		s.result[i2] = int16(s.nowLpr / (fast / slow))
+		s.lowpassed[i2] = int16(s.nowLpr / (fast / slow))
 		s.prevLprIndex -= fast
 		s.nowLpr = 0
 		i2 += 1
 	}
-	s.result = s.result[:i2]
+	s.lowpassed = s.lowpassed[:i2]
 }
 
 func deemphFilter(fm *demodState) {
 	var d int
 	// de-emph IIR
 	// avg = avg * (1 - alpha) + sample * alpha;
-	for i := 0; i < len(fm.result); i++ {
-		d = int(fm.result[i]) - deemphAvg
+	for i := 0; i < len(fm.lowpassed); i++ {
+		d = int(fm.lowpassed[i]) - deemphAvg
 		if d > 0 {
 			deemphAvg += (d + fm.deemphA/2) / fm.deemphA
 		} else {
 			deemphAvg += (d - fm.deemphA/2) / fm.deemphA
 		}
-		fm.result[i] = int16(deemphAvg)
+		fm.lowpassed[i] = int16(deemphAvg)
 	}
 }
 

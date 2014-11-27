@@ -1,19 +1,21 @@
 ## Hamsdr
 
-Software-defined radio scanner. Code based on `rtl_fm.c` from the [rtlsdr project](http://sdr.osmocom.org/trac/wiki/rtl-sdr).
+Software-defined radio scanner. 
 
-Requires rtlsdr library
-
-**NOTE:** work in progress. Currently outputs static audio only.
+_**NOTE:** work in progress._
 
 ### Building
 
-Go is required. Most popular Linux distro ship a golang package.
+Rtlsdr C library is required. Most Linux distros include `rtl-sdr` and `rtl-sdr-devel` packages.
 
-Once Go is installed: 
+Go is required. Most popular Linux distro ship a `golang` package. Once Go is installed: 
 
 - run `go get github.com/porjo/hamsdr` 
 - cd $GOPATH/src/github.com/porjo/hamsdr
 - run `go build`
 
-This will produce a `hamsdr` binary which can be used like `rtl_fm`
+This will produce a `hamsdr` binary which can be [used like](http://kmkeen.com/rtl-demod-guide/) `rtl_fm`
+
+### Credits
+
+- Code based on `rtl_fm` from [rtl-sdr](https://github.com/keenerd/rtl-sdr) by Kyle Keen (@keenerd).

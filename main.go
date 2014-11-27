@@ -46,6 +46,7 @@ const (
 	maximumBufLen     = (maximumOversample * defaultBufLen)
 	autoGain          = -100
 	bufferDump        = 4096
+	minimumRate       = 1000000
 
 	//cicTableMax = 10
 
@@ -68,6 +69,7 @@ type dongleState struct {
 	mute           int
 	demodTarget    *demodState
 	lpChan         chan []int16
+	preRotate      bool
 }
 
 type demodState struct {
@@ -92,15 +94,16 @@ type demodState struct {
 	conseqSquelch      int
 	squelchHits        int
 	terminateOnSquelch int
-	downsamplePasses   int
-	compFirSize        int
-	customAtan         int
-	deemph             bool
-	deemphA            int
-	nowLpr             int
-	prevLprIndex       int
-	dcBlock, dcAvg     int
-	modeDemod          func(fm *demodState)
+	//downsamplePasses   int
+	compFirSize    int
+	customAtan     int
+	deemph         bool
+	deemphA        int
+	nowLpr         int
+	prevLprIndex   int
+	dcBlock, dcAvg int
+	modeDemod      func(fm *demodState)
+	agc            agcState
 }
 
 type outputState struct {
@@ -118,6 +121,16 @@ type controllerState struct {
 	wbMode  bool
 
 	hopChan chan bool
+}
+
+type agcState struct {
+	gainNum    int32
+	gainDen    int32
+	gainMax    int32
+	peakTarget int
+	attackStep int
+	decayStep  int
+	//	int     error;
 }
 
 var dongle *dongleState
@@ -138,12 +151,19 @@ func init() {
 	dongle.gain = autoGain // tenths of a dB
 	dongle.demodTarget = demod
 	dongle.lpChan = make(chan []int16, 1)
+	dongle.preRotate = true
 
 	demod.rateIn = defaultSampleRate
 	demod.rateOut = defaultSampleRate
 	demod.conseqSquelch = 10
 	demod.squelchHits = 11
 	demod.postDownsample = 1 // once this works, default = 4
+	demod.agc.gainDen = 1 << 15
+	demod.agc.gainNum = demod.agc.gainDen
+	demod.agc.peakTarget = 1 << 14
+	demod.agc.gainMax = 256 * demod.agc.gainDen
+	demod.agc.decayStep = 1
+	demod.agc.attackStep = -2
 
 	output.rate = defaultSampleRate
 	output.resultChan = make(chan []int16, 1)
@@ -236,7 +256,7 @@ func rtlsdrCallback(buf []byte, ctx *rtl.UserCtx) {
 		}
 		dongle.mute = 0
 	}
-	if !dongle.offsetTuning {
+	if dongle.preRotate {
 		rotate90(buf)
 	}
 	buf16 := make([]int16, len(buf))
@@ -295,16 +315,19 @@ func optimalSettings(freq int) {
 	// giant ball of hacks
 	// seems unable to do a single pass, 2:1
 	var captureFreq, captureRate int
-	demod.downsample = (1000000 / demod.rateIn) + 1
-	if demod.downsamplePasses > 0 {
-		demod.downsamplePasses = int(math.Log2(float64(demod.downsample)) + 1)
-		demod.downsample = 1 << uint(demod.downsamplePasses)
-	}
+	demod.downsample = (minimumRate / demod.rateIn) + 1
+	/*
+		if demod.downsamplePasses > 0 {
+			demod.downsamplePasses = int(math.Log2(float64(demod.downsample)) + 1)
+			demod.downsample = 1 << uint(demod.downsamplePasses)
+		}
+	*/
 	captureFreq = freq
 	captureRate = demod.downsample * demod.rateIn
-	if !dongle.offsetTuning {
+	if dongle.preRotate {
 		captureFreq = freq + captureRate/4
 	}
+
 	captureFreq += controller.edge * demod.rateIn / 2
 	demod.outputScale = (1 << 15) / (128 * demod.downsample)
 	if demod.outputScale < 1 {
@@ -332,6 +355,7 @@ func controllerRoutine(wg *sync.WaitGroup) {
 
 	// set up primary channel
 	optimalSettings(int(s.freqs[0]))
+	demod.squelchLevel = squelchToRms(demod.squelchLevel, dongle, demod)
 
 	// Set the frequency
 	err = dongle.dev.SetCenterFreq(int(dongle.freq))
@@ -397,6 +421,7 @@ func outputRoutine(wg *sync.WaitGroup) {
 
 func (d *demodState) fullDemod() {
 	var i int
+	doSquelch := false
 
 	lowPass(d)
 
@@ -404,14 +429,23 @@ func (d *demodState) fullDemod() {
 	if d.squelchLevel > 0 {
 		sr := rms(d.lowpassed, 1)
 		if sr < d.squelchLevel {
-			d.squelchHits++
-			for i = 0; i < len(d.lowpassed); i++ {
-				d.lowpassed[i] = 0
-			}
-		} else {
-			d.squelchHits = 0
+			doSquelch = true
 		}
 	}
+
+	if doSquelch {
+		d.squelchHits++
+		for i = 0; i < len(d.lowpassed); i++ {
+			d.lowpassed[i] = 0
+		}
+	} else {
+		d.squelchHits = 0
+	}
+	/*
+		if d.squelchLevel > 0 && d.squelchHits > d.conseqSquelch {
+			d.agc.gainNum = d.agc.gainDen
+		}
+	*/
 
 	d.modeDemod(d)
 	if d.deemph {
@@ -465,11 +499,12 @@ func main() {
 	case "fm":
 		demod.modeDemod = fmDemod
 	case "wbfm":
-		demod.modeDemod = fmDemod
 		controller.wbMode = true
+		demod.modeDemod = fmDemod
 		demod.rateIn = 170000
 		demod.rateOut = 170000
 		demod.rateOut2 = 32000
+		output.rate = 32000
 		demod.customAtan = 1
 		//demod.post_downsample = 4;
 		demod.deemph = true

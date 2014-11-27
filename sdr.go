@@ -321,3 +321,21 @@ func deemphFilter(fm *demodState) {
 		fm.result[i] = int16(deemphAvg)
 	}
 }
+
+// 0 dB = 1 rms at 50dB gain and 1024 downsample
+func squelchToRms(db int, dongle *dongleState, demod *demodState) int {
+	if db == 0 {
+		return 0
+	}
+	linear := math.Pow(10.0, float64(db)/20.0)
+	gain := 50.0
+	if dongle.gain != autoGain {
+		gain = float64(dongle.gain) / 10.0
+	}
+	gain = 50.0 - gain
+	gain = math.Pow(10.0, gain/20.0)
+	downsample := 1024.0 / float64(demod.downsample)
+	linear = linear / gain
+	linear = linear / downsample
+	return int(linear) + 1
+}

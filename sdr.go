@@ -19,7 +19,6 @@ package main
 import (
 	"fmt"
 	"math"
-	//	"os"
 
 	rtl "github.com/jpoirier/gortlsdr"
 )
@@ -340,4 +339,39 @@ func squelchToRms(db int, dongle *dongleState, demod *demodState) int {
 	linear = linear / gain
 	linear = linear / downsample
 	return int(linear) + 1
+}
+
+func softwareAgc(d *demodState) {
+	var peaked bool
+	var output int32
+	for i := 0; i < len(d.lowpassed); i++ {
+		output = int32(d.lowpassed[i])*d.agc.gainNum + int32(d.agc.err)
+		d.agc.err = int(output % d.agc.gainDen)
+		output /= d.agc.gainDen
+
+		if !peaked && int(math.Abs(float64(output))) > d.agc.peakTarget {
+			peaked = true
+		}
+		if peaked {
+			d.agc.gainNum += int32(d.agc.attackStep)
+		} else {
+			d.agc.gainNum += int32(d.agc.decayStep)
+		}
+
+		if d.agc.gainNum < d.agc.gainDen {
+			d.agc.gainNum = d.agc.gainDen
+		}
+		if d.agc.gainNum > d.agc.gainMax {
+			d.agc.gainNum = d.agc.gainMax
+		}
+
+		if output >= (1 << 15) {
+			output = (1 << 15) - 1
+		}
+		if output < -(1 << 15) {
+			output = -(1 << 15) + 1
+		}
+
+		d.lowpassed[i] = int16(output)
+	}
 }

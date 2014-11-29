@@ -103,6 +103,7 @@ type demodState struct {
 	prevLprIndex   int
 	dcBlock, dcAvg int
 	modeDemod      func(fm *demodState)
+	agcEnable      bool
 	agc            agcState
 }
 
@@ -130,7 +131,7 @@ type agcState struct {
 	peakTarget int
 	attackStep int
 	decayStep  int
-	//	int     error;
+	err        int
 }
 
 var dongle *dongleState
@@ -330,6 +331,8 @@ func optimalSettings(freq int) {
 
 	captureFreq += controller.edge * demod.rateIn / 2
 	demod.outputScale = (1 << 15) / (128 * demod.downsample)
+	fmt.Fprintf(os.Stderr, "output scale %d\n", demod.outputScale)
+
 	if demod.outputScale < 1 {
 		demod.outputScale = 1
 	}
@@ -441,13 +444,14 @@ func (d *demodState) fullDemod() {
 	} else {
 		d.squelchHits = 0
 	}
-	/*
-		if d.squelchLevel > 0 && d.squelchHits > d.conseqSquelch {
-			d.agc.gainNum = d.agc.gainDen
-		}
-	*/
+	if d.squelchLevel > 0 && d.squelchHits > d.conseqSquelch {
+		d.agc.gainNum = d.agc.gainDen
+	}
 
 	d.modeDemod(d)
+	if d.agcEnable {
+		softwareAgc(d)
+	}
 	if d.deemph {
 		deemphFilter(d)
 	}
@@ -480,6 +484,7 @@ func main() {
 	rateStr := flag.String("s", "24k", "sample rate")
 	flag.IntVar(&dongle.ppmError, "p", 0, "ppm error")
 	flag.IntVar(&dongle.gain, "g", autoGain, "gain level (defaults to autogain)")
+	flag.BoolVar(&demod.agcEnable, "agc", false, "Software AGC")
 	demodMode := flag.String("M", "am", "demodulation mode [fm, am]")
 
 	flag.Parse()
@@ -538,7 +543,7 @@ func main() {
 	if flag.Arg(0) != "" {
 		output.filename = flag.Arg(0)
 	} else {
-		output.filename = "-"
+		output.filename = ""
 	}
 
 	actualBufLen = lcmPost[demod.postDownsample] * defaultBufLen
@@ -588,7 +593,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Tuner error set to %i ppm.\n", dongle.ppmError)
 	}
 
-	if output.filename == "-" {
+	if output.filename == "" {
 		output.file = os.Stdout
 	} else {
 		output.file, err = os.Create(output.filename)

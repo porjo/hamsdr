@@ -109,14 +109,14 @@ func rotate90(buf []byte) {
 }
 
 func amDemod(am *demodState) {
-	var pcm int16
+	var pcm int32
 	lp := am.lowpassed
 	lpLen := len(am.lowpassed)
 	for i := 0; i < lpLen; i += 2 {
 		// hypot uses floats but won't overflow
 		//r[i/2] = (int16_t)hypot(lp[i], lp[i+1]);
-		pcm = lp[i] * lp[i]
-		pcm += lp[i+1] * lp[i+1]
+		pcm = int32(lp[i] * lp[i])
+		pcm += int32(lp[i+1] * lp[i+1])
 		am.lowpassed[i/2] = int16(math.Sqrt(float64(pcm))) * int16(am.outputScale)
 	}
 	// lowpass? (3khz)  highpass?  (dc)

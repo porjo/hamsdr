@@ -32,16 +32,16 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
+	//	"time"
 
 	rtl "github.com/jpoirier/gortlsdr"
 )
 
-var dongleTimer time.Time
+//var dongleTimer time.Time
 
 const (
 	defaultSampleRate = 24000
-	defaultBufLen     = (1 * 16384)
+	defaultBufLen     = 16384
 	maximumOversample = 16
 	maximumBufLen     = (maximumOversample * defaultBufLen)
 	autoGain          = -100
@@ -74,37 +74,37 @@ type dongleState struct {
 
 type demodState struct {
 	lowpassed []int16
-	lpIHist   [10][6]int16
-	lpQHist   [10][6]int16
+	//lpIHist   [10][6]int16
+	//lpQHist   [10][6]int16
 	//result             []int16 // ?
-	droopIHist         [9]int16
-	droopQHist         [9]int16
-	rateIn             int
-	rateOut            int
-	rateOut2           int
-	nowR               int16
-	nowJ               int16
-	preR               int16
-	preJ               int16
-	prevIndex          int
-	downsample         int // min 1, max 256
-	postDownsample     int
-	outputScale        int
-	squelchLevel       int
-	conseqSquelch      int
-	squelchHits        int
-	terminateOnSquelch int
+	//droopIHist         [9]int16
+	//droopQHist         [9]int16
+	rateIn         int
+	rateOut        int
+	rateOut2       int
+	nowR           int16
+	nowJ           int16
+	preR           int16
+	preJ           int16
+	prevIndex      int
+	downsample     int // min 1, max 256
+	postDownsample int
+	outputScale    int
+	squelchLevel   int
+	conseqSquelch  int
+	squelchHits    int
+	//terminateOnSquelch int
 	//downsamplePasses   int
-	compFirSize    int
-	customAtan     int
-	deemph         bool
-	deemphA        int
-	nowLpr         int
-	prevLprIndex   int
-	dcBlock, dcAvg int
-	modeDemod      func(fm *demodState)
-	agcEnable      bool
-	agc            agcState
+	//compFirSize    int
+	customAtan   int
+	deemph       bool
+	deemphA      int
+	nowLpr       int
+	prevLprIndex int
+	//dcBlock, dcAvg int
+	modeDemod func(fm *demodState)
+	agcEnable bool
+	agc       agcState
 }
 
 type outputState struct {
@@ -118,8 +118,8 @@ type outputState struct {
 type controllerState struct {
 	freqs   frequencies
 	freqNow int
-	edge    int
-	wbMode  bool
+	//edge    int
+	wbMode bool
 
 	hopChan chan bool
 }
@@ -138,9 +138,6 @@ var dongle *dongleState
 var demod *demodState
 var output *outputState
 var controller *controllerState
-
-var actualBufLen int
-var lcmPost = [17]int{1, 1, 1, 3, 1, 5, 3, 7, 1, 9, 5, 11, 3, 13, 7, 15, 1}
 
 func init() {
 	dongle = &dongleState{}
@@ -329,7 +326,7 @@ func optimalSettings(freq int) {
 		captureFreq = freq + captureRate/4
 	}
 
-	captureFreq += controller.edge * demod.rateIn / 2
+	//captureFreq += controller.edge * demod.rateIn / 2
 	demod.outputScale = (1 << 15) / (128 * demod.downsample)
 	fmt.Fprintf(os.Stderr, "output scale %d\n", demod.outputScale)
 
@@ -345,6 +342,7 @@ func optimalSettings(freq int) {
 
 func controllerRoutine(wg *sync.WaitGroup) {
 	var err error
+	var lcmPost = [17]int{1, 1, 1, 3, 1, 5, 3, 7, 1, 9, 5, 11, 3, 13, 7, 15, 1}
 
 	defer wg.Done()
 
@@ -367,6 +365,7 @@ func controllerRoutine(wg *sync.WaitGroup) {
 		return
 	}
 
+	actualBufLen := lcmPost[demod.postDownsample] * defaultBufLen
 	fmt.Fprintf(os.Stderr, "Tuned to %d Hz\n", dongle.freq)
 	fmt.Fprintf(os.Stderr, "Oversampling input by: %dx.\n", demod.downsample)
 	fmt.Fprintf(os.Stderr, "Oversampling output by: %dx.\n", demod.postDownsample)
@@ -545,8 +544,6 @@ func main() {
 	} else {
 		output.filename = ""
 	}
-
-	actualBufLen = lcmPost[demod.postDownsample] * defaultBufLen
 
 	dongle.dev, err = rtl.Open(dongle.devIndex)
 	if err != nil {

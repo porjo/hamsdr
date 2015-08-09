@@ -484,7 +484,7 @@ func main() {
 	flag.IntVar(&dongle.ppmError, "p", 0, "ppm error")
 	flag.IntVar(&dongle.gain, "g", autoGain, "gain level (defaults to autogain)")
 	flag.BoolVar(&demod.agcEnable, "agc", false, "Software AGC")
-	demodMode := flag.String("M", "am", "demodulation mode [fm, am]")
+	demodMode := flag.String("M", "am", "demodulation mode [fm, wbfm, am]")
 
 	flag.Parse()
 

@@ -245,7 +245,7 @@ func freqHz(freqStr string) (freq uint32, err error) {
 	return
 }
 
-func rtlsdrCallback(buf []byte, ctx *rtl.UserCtx) {
+func rtlsdrCallback(buf []byte) {
 	var i int
 
 	if dongle.mute > 0 && dongle.mute < len(buf) {

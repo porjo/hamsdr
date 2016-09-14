@@ -21,7 +21,6 @@
 package main
 
 import (
-	//	"bufio"
 	"encoding/binary"
 	"flag"
 	"fmt"
@@ -32,12 +31,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	//	"time"
 
 	rtl "github.com/jpoirier/gortlsdr"
 )
-
-//var dongleTimer time.Time
 
 const (
 	defaultSampleRate = 24000
@@ -47,8 +43,6 @@ const (
 	autoGain          = -100
 	bufferDump        = 4096
 	minimumRate       = 1000000
-
-	//cicTableMax = 10
 
 	frequenciesLimit = 1000
 )
@@ -74,37 +68,29 @@ type dongleState struct {
 
 type demodState struct {
 	lowpassed []int16
-	//lpIHist   [10][6]int16
-	//lpQHist   [10][6]int16
-	//result             []int16 // ?
-	//droopIHist         [9]int16
-	//droopQHist         [9]int16
-	rateIn         int
-	rateOut        int
-	rateOut2       int
-	nowR           int16
-	nowJ           int16
-	preR           int16
-	preJ           int16
-	prevIndex      int
-	downsample     int // min 1, max 256
+	rateIn    int
+	rateOut   int
+	rateOut2  int
+	nowR      int16
+	nowJ      int16
+	preR      int16
+	preJ      int16
+	prevIndex int
+	// min 1, max 256
+	downsample     int
 	postDownsample int
 	outputScale    int
 	squelchLevel   int
 	conseqSquelch  int
 	squelchHits    int
-	//terminateOnSquelch int
-	//downsamplePasses   int
-	//compFirSize    int
-	customAtan   int
-	deemph       bool
-	deemphA      int
-	nowLpr       int
-	prevLprIndex int
-	//dcBlock, dcAvg int
-	modeDemod func(fm *demodState)
-	agcEnable bool
-	agc       agcState
+	customAtan     int
+	deemph         bool
+	deemphA        int
+	nowLpr         int
+	prevLprIndex   int
+	modeDemod      func(fm *demodState)
+	agcEnable      bool
+	agc            agcState
 }
 
 type outputState struct {
@@ -118,8 +104,7 @@ type outputState struct {
 type controllerState struct {
 	freqs   frequencies
 	freqNow int
-	//edge    int
-	wbMode bool
+	wbMode  bool
 
 	hopChan chan bool
 }
@@ -146,7 +131,8 @@ func init() {
 	controller = &controllerState{}
 
 	dongle.rate = defaultSampleRate
-	dongle.gain = autoGain // tenths of a dB
+	// tenths of a dB
+	dongle.gain = autoGain
 	dongle.demodTarget = demod
 	dongle.lpChan = make(chan []int16, 1)
 	dongle.preRotate = true
@@ -155,7 +141,8 @@ func init() {
 	demod.rateOut = defaultSampleRate
 	demod.conseqSquelch = 10
 	demod.squelchHits = 11
-	demod.postDownsample = 1 // once this works, default = 4
+	// once this works, default = 4
+	demod.postDownsample = 1
 	demod.agc.gainDen = 1 << 15
 	demod.agc.gainNum = demod.agc.gainDen
 	demod.agc.peakTarget = 1 << 14
@@ -261,7 +248,6 @@ func rtlsdrCallback(buf []byte) {
 	for i := range buf {
 		buf16[i] = int16(buf[i]) - 127
 	}
-	//fmt.Fprintf(os.Stderr, "2 buf %x %x %x %x, buf16 %x %x %x %x, buf len %d\n", buf[0], buf[1], buf[2], buf[3], uint16(buf16[0]), uint16(buf16[1]), uint16(buf16[2]), uint16(buf16[3]), len(buf))
 
 	dongle.lpChan <- buf16
 }
@@ -269,7 +255,6 @@ func rtlsdrCallback(buf []byte) {
 // ReadAsync blocks until CancelAsync
 func dongleRoutine(wg *sync.WaitGroup) {
 	defer wg.Done()
-	//err := dongle.dev.ReadAsync(rtlsdrCallback, nil, 0, rtl.DefaultBufLength)
 	err := dongle.dev.ReadAsync(rtlsdrCallback, nil, 0, 0)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ReadAsync failed, err %s\n", err)
@@ -310,23 +295,14 @@ func demodRoutine(wg *sync.WaitGroup) {
 }
 
 func optimalSettings(freq int) {
-	// giant ball of hacks
-	// seems unable to do a single pass, 2:1
 	var captureFreq, captureRate int
 	demod.downsample = (minimumRate / demod.rateIn) + 1
-	/*
-		if demod.downsamplePasses > 0 {
-			demod.downsamplePasses = int(math.Log2(float64(demod.downsample)) + 1)
-			demod.downsample = 1 << uint(demod.downsamplePasses)
-		}
-	*/
 	captureFreq = freq
 	captureRate = demod.downsample * demod.rateIn
 	if dongle.preRotate {
 		captureFreq = freq + captureRate/4
 	}
 
-	//captureFreq += controller.edge * demod.rateIn / 2
 	demod.outputScale = (1 << 15) / (128 * demod.downsample)
 	fmt.Fprintf(os.Stderr, "output scale %d\n", demod.outputScale)
 
@@ -390,9 +366,7 @@ func controllerRoutine(wg *sync.WaitGroup) {
 		if len(s.freqs) <= 1 {
 			continue
 		}
-		// hacky hopping
 		s.freqNow = (s.freqNow + 1) % len(s.freqs)
-		//fmt.Fprintf(os.Stderr, "controller, freqnow %d\n", s.freqs[s.freqNow])
 		optimalSettings(int(s.freqs[s.freqNow]))
 		err = dongle.dev.SetCenterFreq(int(dongle.freq))
 		if err != nil {

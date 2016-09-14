@@ -25,38 +25,6 @@ import (
 
 var deemphAvg int
 
-/*
-var cic_9_tables = [10][10]int{
-	{9, -156, -97, 2798, -15489, 61019, -15489, 2798, -97, -156},
-	{9, -128, -568, 5593, -24125, 74126, -24125, 5593, -568, -128},
-	{9, -129, -639, 6187, -26281, 77511, -26281, 6187, -639, -129},
-	{9, -122, -612, 6082, -26353, 77818, -26353, 6082, -612, -122},
-	{9, -120, -602, 6015, -26269, 77757, -26269, 6015, -602, -120},
-	{9, -120, -582, 5951, -26128, 77542, -26128, 5951, -582, -120},
-	{9, -119, -580, 5931, -26094, 77505, -26094, 5931, -580, -119},
-	{9, -119, -578, 5921, -26077, 77484, -26077, 5921, -578, -119},
-	{9, -119, -577, 5917, -26067, 77473, -26067, 5917, -577, -119},
-	{9, -199, -362, 5303, -25505, 77489, -25505, 5303, -362, -199},
-}
-*/
-
-/*
-// https://gist.github.com/DavidVaini/10308388
-func round(val float64, places int) (newVal float64) {
-	var round float64
-	pow := math.Pow(10, float64(places))
-	digit := pow * val
-	_, div := math.Modf(digit)
-	if div >= .5 {
-		round = math.Ceil(digit)
-	} else {
-		round = math.Floor(digit)
-	}
-	newVal = round / pow
-	return
-}
-*/
-
 func round(x float64) float64 {
 	if x > 0.0 {
 		return math.Floor(x + 0.5)
@@ -65,8 +33,6 @@ func round(x float64) float64 {
 	}
 }
 
-// Can't use rtl.Context as method receiver, get error: "expected (unqualified) identifier"
-//func (dev *rtl.Context) nearestGain(targetGain int) (err error, nearest int) {
 func nearestGain(dev *rtl.Context, targetGain int) (nearest int, err error) {
 	err = dev.SetTunerGainMode(true)
 	if err != nil {
@@ -113,13 +79,10 @@ func amDemod(am *demodState) {
 	lp := am.lowpassed
 	lpLen := len(am.lowpassed)
 	for i := 0; i < lpLen; i += 2 {
-		// hypot uses floats but won't overflow
-		//r[i/2] = (int16_t)hypot(lp[i], lp[i+1]);
 		pcm = int32(lp[i] * lp[i])
 		pcm += int32(lp[i+1] * lp[i+1])
 		am.lowpassed[i/2] = int16(math.Sqrt(float64(pcm))) * int16(am.outputScale)
 	}
-	// lowpass? (3khz)  highpass?  (dc)
 	am.lowpassed = am.lowpassed[:lpLen/2]
 }
 
@@ -139,7 +102,6 @@ func polarDiscFast(ar, aj, br, bj int) int {
 	return fastAtan2(cj, cr)
 }
 
-// pre scaled for int16
 func fastAtan2(y, x int) int {
 	var pi4, pi34, yabs, angle int
 	pi4 = 1 << 12
@@ -185,68 +147,6 @@ func fmDemod(fm *demodState) {
 	fm.lowpassed = fm.lowpassed[:lpLen/2]
 }
 
-/*
-
-// for half of interleaved data
-func fifthOrder(data []int16, startIdx int, hist [6]int16) {
-	var i int
-	var a, b, c, d, e, f int16
-	if len(data) == 0 {
-		return
-	}
-	a = hist[1]
-	b = hist[2]
-	c = hist[3]
-	d = hist[4]
-	e = hist[5]
-	f = data[startIdx]
-	// a downsample should improve resolution, so don't fully shift
-	data[startIdx] = (a + (b+e)*5 + (c+d)*10 + f) >> 4
-	for i = startIdx + 4; i < len(data); i += 4 {
-		a = c
-		b = d
-		c = e
-		d = f
-		e = data[i-2]
-		f = data[i]
-		data[i/2] = (a + (b+e)*5 + (c+d)*10 + f) >> 4
-	}
-	// archive
-	hist[0] = a
-	hist[1] = b
-	hist[2] = c
-	hist[3] = d
-	hist[4] = e
-	hist[5] = f
-}
-
-// Okay, not at all generic.  Assumes length 9, fix that eventually.
-func genericFir(data []int16, fir int, hist [6]int16)
-{
-	int d, temp, sum;
-	for (d=0; d<length; d+=2) {
-		temp = data[d];
-		sum = 0;
-		sum += (hist[0] + hist[8]) * fir[1];
-		sum += (hist[1] + hist[7]) * fir[2];
-		sum += (hist[2] + hist[6]) * fir[3];
-		sum += (hist[3] + hist[5]) * fir[4];
-		sum +=            hist[4]  * fir[5];
-		data[d] = sum >> 15 ;
-		hist[0] = hist[1];
-		hist[1] = hist[2];
-		hist[2] = hist[3];
-		hist[3] = hist[4];
-		hist[4] = hist[5];
-		hist[5] = hist[6];
-		hist[6] = hist[7];
-		hist[7] = hist[8];
-		hist[8] = temp;
-	}
-}
-*/
-
-// largely lifted from rtl_power
 func rms(samples []int16, step int) int {
 	var i int
 	var p, t, s int32
@@ -259,7 +159,6 @@ func rms(samples []int16, step int) int {
 		t += s
 		p += s * s
 	}
-	// correct for dc offset in squares
 	dc = float32(t*int32(step)) / float32(l)
 	res = float32(t)*2*dc - dc*dc*float32(l)
 
@@ -288,7 +187,6 @@ func lowPass(d *demodState) {
 }
 
 // simple square window FIR
-// add support for upsampling?
 func lowPassReal(s *demodState) {
 	var i, i2 int
 	fast := s.rateOut
@@ -311,7 +209,6 @@ func lowPassReal(s *demodState) {
 func deemphFilter(fm *demodState) {
 	var d int
 	// de-emph IIR
-	// avg = avg * (1 - alpha) + sample * alpha;
 	for i := 0; i < len(fm.lowpassed); i++ {
 		d = int(fm.lowpassed[i]) - deemphAvg
 		if d > 0 {

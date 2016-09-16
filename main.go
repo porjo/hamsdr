@@ -31,6 +31,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	rtl "github.com/jpoirier/gortlsdr"
 )
@@ -97,6 +98,7 @@ type outputState struct {
 	file     *os.File
 	filename string
 	rate     int
+	pad      bool
 
 	resultChan chan []int16
 }
@@ -380,17 +382,51 @@ func controllerRoutine(wg *sync.WaitGroup) {
 func outputRoutine(wg *sync.WaitGroup) {
 	var err error
 
+	defer fmt.Fprintf(os.Stderr, "Returning from outputRoutine\n")
 	defer wg.Done()
-	for {
-		result, ok := <-output.resultChan
-		if !ok {
-			fmt.Fprintf(os.Stderr, "Returning from outputRoutine\n")
-			return
-		}
 
-		err = binary.Write(output.file, binary.LittleEndian, result)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "output write error: %s\n", err)
+	if output.pad {
+		startTime := time.Now()
+		var samples, samplesNow int64
+		ticker := time.NewTicker(time.Millisecond * 10)
+		defer ticker.Stop()
+		for {
+			select {
+			case buf, ok := <-output.resultChan:
+				if !ok {
+					return
+				}
+				samples += int64(len(buf))
+				err = binary.Write(output.file, binary.LittleEndian, buf)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "output write error: %s\n", err)
+				}
+			case <-ticker.C:
+
+				samplesNow = int64((time.Since(startTime) * time.Duration(output.rate)) / time.Second)
+
+				if samplesNow < samples {
+					continue
+				}
+				buf := make([]int16, samplesNow-samples)
+				err = binary.Write(output.file, binary.LittleEndian, buf)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "output write error: %s\n", err)
+				}
+				samples = samplesNow
+			}
+		}
+	} else {
+		for {
+			buf, ok := <-output.resultChan
+			if !ok {
+				return
+			}
+
+			err = binary.Write(output.file, binary.LittleEndian, buf)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "output write error: %s\n", err)
+			}
 		}
 	}
 }
@@ -458,6 +494,7 @@ func main() {
 	flag.IntVar(&dongle.ppmError, "p", 0, "ppm error")
 	flag.IntVar(&dongle.gain, "g", autoGain, "gain level (defaults to autogain)")
 	flag.BoolVar(&demod.agcEnable, "agc", false, "Software AGC")
+	flag.BoolVar(&output.pad, "pad", false, "pad output gaps with zeros")
 	demodMode := flag.String("M", "am", "demodulation mode [fm, wbfm, am]")
 
 	flag.Parse()

@@ -1,8 +1,6 @@
 ## Hamsdr
 
-Software-defined radio scanner. 
-
-_**NOTE:** work in progress._
+Software-defined radio scanner.
 
 ### Requirements
 
@@ -20,13 +18,35 @@ hamsdr -M wbfm -f 89.1M | play -r 32k -t raw -e s -b 16 -c 1 -V1 -
 
 ### Building
 
-Rtl-sdr C library is required. Most Linux distros include `rtl-sdr` and `rtl-sdr-devel` packages.
+Rtl-sdr C library is required. Most Linux distros include `rtl-sdr` and `rtl-sdr-devel` packages, unfortunately they are quite out of date which causes the build to fail - you will need to grab the latest source.
 
-Go is required. Most popular Linux distro ship a `golang` package. Once Go is installed: 
+#### Building rtl-sdr
 
-- `go get github.com/porjo/hamsdr` 
-- cd $GOPATH/src/github.com/porjo/hamsdr
-- `go build`
+My prefered way of building is as follows:
+
+- download latest RTL SDR source: `git clone https://github.com/librtlsdr/librtlsdr`
+- build and install RTL SDR to /usr/local
+```
+$ cd librtlsdr
+$ mkdir build
+$ cd build
+$ cmake -DCMAKE_INSTALL_PREFIX:PATH=/local/rtl-sdr ../
+$ make
+$ sudo make install
+```
+
+#### Building Hamsdr
+
+- `go get github.com/porjo/hamsdr`
+- ignore compile error: `fatal error: rtl-sdr.h: No such file or directory`
+- cd `$GOPATH/src/github.com/porjo/hamsdr`
+- build Hamsdr against RTL SDR:
+```
+$ CGO_LDFLAGS="-lrtlsdr -L/usr/local/rtl-sdr/lib" \
+  CGO_CPPFLAGS="-I/usr/local/rtl-sdr/include"  \
+  go build
+```
+- Find `hamsdr` binary in current directory
 
 
 ### Credits

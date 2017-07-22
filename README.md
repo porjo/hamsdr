@@ -10,7 +10,7 @@ Software-defined radio scanner.
 
 Grab one of the [pre-compiled binaries](https://github.com/porjo/hamsdr/releases) for Linux (amd64 or Arm), or compile from source as described below.
 
-The `hamsdr` binary is used in the same was as [rtl_fm](http://kmkeen.com/rtl-demod-guide/) e.g.
+The `hamsdr` binary is used in the same way as [rtl_fm](http://kmkeen.com/rtl-demod-guide/) e.g.
 
 ```
 hamsdr -M wbfm -f 89.1M | play -r 32k -t raw -e s -b 16 -c 1 -V1 -
@@ -30,7 +30,7 @@ My prefered way of building is as follows:
 $ cd librtlsdr
 $ mkdir build
 $ cd build
-$ cmake -DCMAKE_INSTALL_PREFIX:PATH=/local/rtl-sdr ../
+$ cmake -DCMAKE_INSTALL_PREFIX:PATH=/usr/local/rtl-sdr ../
 $ make
 $ sudo make install
 ```

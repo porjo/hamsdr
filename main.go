@@ -530,6 +530,7 @@ func main() {
 
 	if len(controller.freqs) == 0 {
 		fmt.Fprintln(os.Stderr, "Please specify a frequency.")
+		flag.PrintDefaults()
 		return
 	}
 
